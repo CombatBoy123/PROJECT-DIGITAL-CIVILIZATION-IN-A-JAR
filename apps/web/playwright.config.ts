@@ -47,7 +47,8 @@ export default defineConfig({
       stderr: 'pipe',
       env: {
         NODE_ENV: 'test',
-        DATABASE_URL: 'postgresql://civ:civ@localhost:5432/civ_e2e',
+        // Same default as the root db:migrate:e2e script, which migrates this database.
+        DATABASE_URL: process.env.E2E_DATABASE_URL ?? 'postgresql://civ:civ@localhost:5432/civ_e2e',
         HOST: '127.0.0.1',
         PORT: String(E2E_API_PORT),
         AUTH_MODE: 'disabled',

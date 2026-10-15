@@ -6,15 +6,14 @@ configuration and number of ticks** (see
 walkthrough shows that with real values, first with the engine alone and then through
 the API, and explains what reproducibility does and does not promise.
 
-Every number on this page was produced by running the code (engine `0.1.0` as of
-commit `88d349b`, Node v22.22.0) on 2026-10-15. Re-run the script to check them on your
-machine.
+Every number on this page was produced by running the code (engine `0.2.0`, Node
+v22.22.0) on 2026-10-15. Re-run the script to check them on your machine.
 
-> **Results changed in commit `88d349b` without a new `ENGINE_VERSION`.** That commit
-> made outings time- and energy-aware and renumbered houses (see
-> [SIMULATION_RULES.md](SIMULATION_RULES.md#venue-choice)), so every hash and most
-> activity metrics differ from those of earlier `0.1.0` builds, although the version
-> string is the same. Compare hashes only between builds of the same commit or later.
+> **Engine `0.2.0` changed results.** Outings became time- and energy-aware and houses
+> were renumbered (see [SIMULATION_RULES.md](SIMULATION_RULES.md#venue-choice)), so every
+> hash and most activity metrics differ from engine `0.1.0`. Two intermediate commits
+> (`88d349b`, `2175f7f`) already produced these `0.2.0` results while still reporting
+> `0.1.0`.
 
 ## 1. Engine-only walkthrough
 
@@ -157,7 +156,7 @@ at a given tick.
   "formatVersion": 1,
   "name": "Demo One",
   "seed": "demo-1",
-  "engineVersion": "0.1.0",
+  "engineVersion": "0.2.0",
   "configSchemaVersion": 1,
   "config": {
     "population": 100,

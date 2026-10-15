@@ -7,8 +7,8 @@ in `apps/server/src/routes/` and `apps/server/src/ws/stream.ts`.
 
 All examples below are real responses from the production build of the server
 (`node apps/server/dist/index.js`, `AUTH_MODE=token` with both tokens set, seed
-`demo-1`, 100 citizens), recorded on 2026-10-15 with engine `0.1.0` as of commit
-`88d349b` and shortened where marked with `…`. Ids, timestamps and the ticks reached
+`demo-1`, 100 citizens), recorded on 2026-10-15 (engine `0.2.0` results; the build at the time still reported
+`0.1.0`, the only difference in these responses) and shortened where marked with `…`. Ids, timestamps and the ticks reached
 while running in real time differ from run to run; hashes, metrics, names and every
 other simulation value are reproducible.
 
@@ -240,7 +240,7 @@ curl -s $API/api/meta
 
 ```json
 {
-  "engineVersion": "0.1.0",
+  "engineVersion": "0.2.0",
   "authMode": "token",
   "readRequiresToken": true,
   "frameRate": 5,
@@ -288,7 +288,7 @@ curl -s -X POST $API/api/civilizations -H "$AUTH" -H "$JSON" \
 { "id": "6dfb1e4c-edf2-4709-a429-9003aa0419af", "name": "Demo One", "seed": "demo-1",
   "status": "paused", "speed": 5, "durableTick": 0, "tick": 0,
   "calendar": { "tick": 0, "day": 1, "hour": 0, "dayOfSeason": 0, "dayOfYear": 0, "season": "spring", "year": 1 },
-  "population": 100, "engineVersion": "0.1.0", "haltReason": null, "lastError": null, "loaded": true, …,
+  "population": 100, "engineVersion": "0.2.0", "haltReason": null, "lastError": null, "loaded": true, …,
   "config": { "population": 100, "daysPerSeason": 7, "initialWealth": { "meanCents": 50000, "spread": 0.5 },
               "lifeStages": { "adultAge": 18, "elderAge": 65 }, "movement": { "walkTilesPerTick": 24 },
               "stochastic": { "weather": true }, "metricsInterval": 1 },

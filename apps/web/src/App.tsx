@@ -1,13 +1,21 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { lazy, Suspense } from 'react';
 import { Link, Outlet, RouterProvider, createBrowserRouter, useParams } from 'react-router-dom';
 import { shouldRetry, useMeta } from './api/queries';
 import { AuthControl } from './components/AuthControl';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { EmptyState } from './components/Feedback';
+import { EmptyState, LoadingRegion } from './components/Feedback';
 import { ToastProvider } from './components/Toasts';
 import { CivilizationsPage } from './pages/civilizations/CivilizationsPage';
-import { DashboardPage } from './pages/dashboard/DashboardPage';
-import { ObservatoryPage } from './pages/observatory/ObservatoryPage';
+
+// The observatory (PixiJS) and the dashboard (Recharts) are loaded on demand, so the
+// civilization list does not download the map renderer and the chart library.
+const ObservatoryPage = lazy(() =>
+  import('./pages/observatory/ObservatoryPage').then((m) => ({ default: m.ObservatoryPage })),
+);
+const DashboardPage = lazy(() =>
+  import('./pages/dashboard/DashboardPage').then((m) => ({ default: m.DashboardPage })),
+);
 
 /*
  * Application root: data client, notifications, routing and the global chrome.
@@ -58,7 +66,15 @@ function Shell() {
       </header>
       <main id="main" className="app-main">
         <ErrorBoundary area="Page">
-          <Outlet />
+          <Suspense
+            fallback={
+              <div className="page">
+                <LoadingRegion label="Loading page" />
+              </div>
+            }
+          >
+            <Outlet />
+          </Suspense>
         </ErrorBoundary>
       </main>
     </div>

@@ -223,6 +223,21 @@ describe('invariants', () => {
     expect(heatwave).toEqual(['ENVIRONMENT']);
   });
 
+  it('detects an invalid clock and activities that start in the future', () => {
+    expect(codesAfter((s) => void (s.tick = -1))).toContain('CLOCK');
+    expect(codesAfter((s) => void (s.tick = 30.5))).toContain('CLOCK');
+    expect(codesAfter((s) => void (s.citizens[0]!.activitySince = s.tick + 1))).toContain('CLOCK');
+  });
+
+  it('validates genesis and restored states even when per-tick checks are off', () => {
+    const { simulation } = newSimulation('invariants-off');
+    const state = cloneState(simulation);
+    state.citizens[0]!.balanceCents = -1;
+    expect(() => Simulation.fromState(state, { invariants: 'off' })).toThrow(
+      InvariantViolationError,
+    );
+  });
+
   it('detects needs out of bounds', () => {
     expect(codesAfter((s) => void (s.citizens[0]!.needs.energy = 101))).toContain('NEEDS_BOUNDS');
     expect(codesAfter((s) => void (s.citizens[0]!.needs.energy = -0.1))).toContain('NEEDS_BOUNDS');

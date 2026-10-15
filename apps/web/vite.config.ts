@@ -1,6 +1,6 @@
 /// <reference types="vitest/config" />
 import react from '@vitejs/plugin-react';
-import { defaultClientConditions, defaultServerConditions, defineConfig } from 'vite';
+import { createLogger, defaultClientConditions, defaultServerConditions, defineConfig } from 'vite';
 
 /*
  * Vite (dev server + build) and Vitest configuration for the observatory.
@@ -12,7 +12,23 @@ import { defaultClientConditions, defaultServerConditions, defineConfig } from '
  */
 const apiTarget = process.env.API_PROXY_TARGET ?? 'http://127.0.0.1:3001';
 
+/** Socket errors that only mean "the browser closed its end of the proxied WebSocket". */
+const CLOSED_SOCKET_CODES = new Set(['ECONNRESET', 'EPIPE']);
+
+/*
+ * Vite logs a stack trace for every proxied WebSocket that the browser closes while
+ * navigating away. Those are expected; every other message is logged unchanged.
+ */
+const logger = createLogger();
+const logError = logger.error.bind(logger);
+logger.error = (message, options) => {
+  const code = (options?.error as NodeJS.ErrnoException | null | undefined)?.code;
+  if (message.includes('ws proxy') && code !== undefined && CLOSED_SOCKET_CODES.has(code)) return;
+  logError(message, options);
+};
+
 export default defineConfig({
+  customLogger: logger,
   plugins: [react()],
   resolve: {
     conditions: [...defaultClientConditions, 'source'],
@@ -29,7 +45,6 @@ export default defineConfig({
   },
   build: {
     sourcemap: true,
-    chunkSizeWarningLimit: 1500,
   },
   test: {
     include: ['src/**/*.test.{ts,tsx}'],

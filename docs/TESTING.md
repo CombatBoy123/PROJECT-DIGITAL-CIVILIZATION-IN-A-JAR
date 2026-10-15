@@ -26,7 +26,7 @@ own (it is exercised by the server and web tests). `pnpm test:e2e` first runs
 | ---------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `civ_dev`  | `pnpm dev`               | `pnpm db:migrate`                                                                                                                                                                                                                                                |
 | `civ_test` | server integration tests | URL from `TEST_DATABASE_URL` (default `postgresql://civ:civ@localhost:5432/civ_test`); the test setup (`apps/server/test/global-setup.ts`) applies migrations itself. **Tables are truncated by the tests.** Test files run one at a time because they share it. |
-| `civ_e2e`  | Playwright's server      | fixed in `apps/web/playwright.config.ts`; `pnpm test:e2e` migrates it (`pnpm db:migrate:e2e`, which uses `E2E_DATABASE_URL` when set)                                                                                                                            |
+| `civ_e2e`  | Playwright's server      | `E2E_DATABASE_URL` or the default in `apps/web/playwright.config.ts`; `pnpm test:e2e` migrates it (`pnpm db:migrate:e2e`, which uses `E2E_DATABASE_URL` when set)                                                                                                |
 
 `docker compose up -d db` creates all three databases on first start (see
 [DEVELOPMENT.md](DEVELOPMENT.md#database)). Never point `TEST_DATABASE_URL` at a
@@ -34,7 +34,7 @@ database whose data you want to keep.
 
 ## What the tests cover
 
-### Engine (`packages/sim-core/test`, 92 tests)
+### Engine (`packages/sim-core/test`, 94 tests)
 
 | File                  | Tests | Covers                                                                                                                                                                                                                                                                                   |
 | --------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -44,7 +44,7 @@ database whose data you want to keep.
 | `systems.test.ts`     | 18    | environment (weather on/off, temperature), demography, energy bounds, routine rules, outings that must fit the day and the energy budget, nobody out at night at population 1,000 / walking speed 4 and population 5,000 / walking speed 24, storms, travel times and road routes        |
 | `events.test.ts`      | 5     | contiguous increasing sequence numbers across ticks, event stamping, catalogue metadata for every type, payloads are plain JSON, frame tuples                                                                                                                                            |
 | `metrics.test.ts`     | 8     | median/mean/Gini on known inputs; every metric has a unique key and a definition; activity and stage counts sum to the population; money supply equals cumulative issuance; `metricsInterval` sampling                                                                                   |
-| `invariants.test.ts`  | 18    | a valid run has no violation at any tick; each violation class except `CLOCK` is detected (below); correctly timed trips are accepted; restore refuses impossible states and the engine halts                                                                                            |
+| `invariants.test.ts`  | 20    | a valid run has no violation at any tick; each violation class is detected (below); correctly timed trips are accepted; restore refuses impossible states (also with per-tick checks off) and the engine halts                                                                           |
 | `determinism.test.ts` | 12    | same seed ⇒ same hashes, events and metrics; different seeds/configs differ; weather off is repeatable; save/restore reproduces the hash and the continuation; tampered or invalid states, unknown properties and seeds that creation would refuse are rejected; canonical serialisation |
 
 **Invariant detection** (`invariants.test.ts`) corrupts a valid state on purpose and
@@ -61,10 +61,9 @@ broken event sequences (`EVENT_SEQUENCE`). The last test proves that the engine 
 to restore an impossible state and halts when a step produces one. The server-level
 halt is covered by `snapshots-halt.test.ts`.
 
-**Gap:** no test asserts the `CLOCK` code (a negative or non-integer tick, an
-`activitySince` in the future). The check exists in `check.ts`, but a regression in it
-would go unnoticed; this is why Phase 1 acceptance criterion 8 is not yet marked done
-in [ROADMAP.md](ROADMAP.md#acceptance-criteria).
+Every invariant code has a detection test, including `CLOCK` (a negative or non-integer
+tick, an `activitySince` in the future), and a test proves that genesis and restored
+states are validated even when per-tick checks are off.
 
 ### Server (`apps/server/test`, real PostgreSQL, 75 tests)
 
@@ -128,7 +127,7 @@ Chromium from Playwright):
 | ---------------------------------- | --------------------------------------- |
 | `pnpm typecheck`                   | passed in all 4 packages                |
 | `pnpm lint`                        | passed                                  |
-| `pnpm --filter @civ/sim-core test` | 92 / 92 passed (8 files)                |
+| `pnpm --filter @civ/sim-core test` | 94 / 94 passed (8 files)                |
 | `pnpm --filter @civ/web test`      | 120 / 120 passed (15 files)             |
 | `pnpm --filter @civ/server test`   | 75 / 75 passed (9 files)                |
 | `pnpm test:e2e` (from the root)    | `civ_e2e` migrated, then 18 / 18 passed |
@@ -159,9 +158,10 @@ TEST_DATABASE_URL=postgresql://civ:civ@localhost:5432/other_test pnpm --filter @
 E2E_DATABASE_URL=postgresql://civ:civ@localhost:5432/other_e2e pnpm db:migrate:e2e
 ```
 
-`pnpm db:migrate:e2e` uses POSIX shell syntax for its default URL; on Windows run
-`pnpm db:migrate` with `DATABASE_URL` set to the `civ_e2e` URL instead. When not on CI,
-Playwright reuses servers already listening on ports 3101 and 5273.
+`pnpm db:migrate:e2e` (`scripts/migrate-e2e.mjs`) works on every platform, Windows
+included. Playwright's server uses the same database (`E2E_DATABASE_URL`, default
+`civ_e2e`). When not on CI, Playwright reuses servers already listening on ports 3101
+and 5273.
 
 ## Benchmark
 

@@ -17,7 +17,7 @@
     "test": "pnpm -r test",
     "test:e2e": "pnpm db:migrate:e2e && pnpm --filter @civ/web test:e2e",
     "db:migrate": "pnpm --filter @civ/server db:migrate",
-    "db:migrate:e2e": "DATABASE_URL=\"${E2E_DATABASE_URL:-postgresql://civ:civ@localhost:5432/civ_e2e}\" pnpm db:migrate",
+    "db:migrate:e2e": "node scripts/migrate-e2e.mjs",
     "db:generate": "pnpm --filter @civ/server db:generate",
     "benchmark": "pnpm --filter @civ/sim-core benchmark",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test"

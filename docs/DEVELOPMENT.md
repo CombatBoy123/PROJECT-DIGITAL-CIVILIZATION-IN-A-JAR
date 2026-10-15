@@ -78,7 +78,7 @@ Root (`package.json`):
 | `pnpm test:e2e`       | `db:migrate:e2e`, then the Playwright browser tests (`@civ/web`)                                        |
 | `pnpm check`          | `format:check`, `lint`, `typecheck`, `test`                                                             |
 | `pnpm db:migrate`     | `prisma migrate deploy` for `DATABASE_URL`                                                              |
-| `pnpm db:migrate:e2e` | `pnpm db:migrate` for `civ_e2e` (`E2E_DATABASE_URL` overrides the URL; POSIX shell syntax)              |
+| `pnpm db:migrate:e2e` | `pnpm db:migrate` for `civ_e2e` (`E2E_DATABASE_URL` overrides the URL; works on Windows too)            |
 | `pnpm db:generate`    | regenerate the Prisma client                                                                            |
 | `pnpm benchmark`      | engine tick benchmark (see [TESTING.md](TESTING.md#benchmark))                                          |
 

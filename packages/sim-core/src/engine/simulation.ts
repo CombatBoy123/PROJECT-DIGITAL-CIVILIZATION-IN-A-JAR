@@ -16,8 +16,9 @@ import { createTickContext, WorldIndex } from './context.js';
 import { PIPELINE } from './pipeline.js';
 
 /**
- * When invariants are checked. 'every-tick' is the default; 'off' exists for
- * benchmarks and must not be used for experiments whose results matter.
+ * When invariants are checked. 'every-tick' is the default; 'off' skips the per-tick
+ * checks (genesis and restored states are still validated). It exists for benchmarks
+ * and must not be used for experiments whose results matter.
  */
 export type InvariantMode = 'every-tick' | 'off';
 
@@ -66,7 +67,7 @@ export class Simulation {
     const config = parseConfig(configInput);
     const { state, events } = generateWorld(seed, config);
     const simulation = new Simulation(state, options);
-    simulation.verify(events, 1, 0);
+    simulation.verify(events, 1, 0, true);
     return {
       simulation,
       genesis: { tick: 0, events, metrics: { tick: 0, values: computeMetrics(state) } },
@@ -80,7 +81,7 @@ export class Simulation {
     options: SimulationOptions = {},
   ): Simulation {
     const simulation = new Simulation(deserializeState(json, expectedHash), options);
-    simulation.verify([], simulation.current.nextEventSeq, simulation.current.tick);
+    simulation.verify([], simulation.current.nextEventSeq, simulation.current.tick, true);
     return simulation;
   }
 
@@ -146,8 +147,18 @@ export class Simulation {
     return hashState(this.current);
   }
 
-  private verify(events: readonly SimEvent[], firstSeq: number, tick: number): void {
-    if (this.invariantMode === 'off') return;
+  /**
+   * Check invariants and the event sequence; throws (and halts) on any violation.
+   * `always` forces the check even with invariants 'off': genesis and restored states
+   * are always validated, so 'off' only skips the per-tick checks.
+   */
+  private verify(
+    events: readonly SimEvent[],
+    firstSeq: number,
+    tick: number,
+    always = false,
+  ): void {
+    if (this.invariantMode === 'off' && !always) return;
     const violations = [
       ...checkInvariants(this.current),
       ...checkEventSequence(events, firstSeq, tick),

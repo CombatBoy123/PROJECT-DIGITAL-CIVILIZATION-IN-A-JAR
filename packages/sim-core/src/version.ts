@@ -1,5 +1,5 @@
 /** Version of the simulation rules. Bumped whenever a rule change alters results. */
-export const ENGINE_VERSION = '0.1.0';
+export const ENGINE_VERSION = '0.2.0';
 
 /**
  * Version of the serialised WorldState layout. States with a different version are

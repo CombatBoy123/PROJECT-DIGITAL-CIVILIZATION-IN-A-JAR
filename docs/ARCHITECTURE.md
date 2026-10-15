@@ -348,8 +348,9 @@ Items 1–9 and 11–13 are the twelve codes reported by `checkInvariants` /
 `HOUSING`, `LOCATION`, `NEEDS_BOUNDS`, `LIFE_STAGE`, `EVENT_SEQUENCE`, `MAP`,
 `VENUE_CAPACITY`, `ENVIRONMENT`); item 10 is enforced by `deserializeState`. See
 [SIMULATION_RULES.md](SIMULATION_RULES.md#invariants) for the exact conditions.
-With `INVARIANT_CHECKS=off` (benchmarks only) none of the twelve coded checks run,
-not even at genesis or on restore; the schema and hash checks of item 10 still do.
+With `INVARIANT_CHECKS=off` (benchmarks only) the twelve coded checks are skipped after
+each step but still run at genesis and on every restore, as do the schema and hash checks
+of item 10.
 
 Planned with Phase 2+: inventories never negative, sales ≤ owned inventory,
 production consumes recipe inputs, every transfer has matching debit and credit.

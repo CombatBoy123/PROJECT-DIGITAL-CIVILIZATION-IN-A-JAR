@@ -9,7 +9,7 @@ Related documents: [ARCHITECTURE.md](ARCHITECTURE.md) (system design),
 [ECONOMIC_MODEL.md](ECONOMIC_MODEL.md) (money and metrics),
 [EXPERIMENTS.md](EXPERIMENTS.md) (reproducibility walkthrough with real values).
 
-Engine version `0.1.0` (`ENGINE_VERSION`), state schema version 1, config schema
+Engine version `0.2.0` (`ENGINE_VERSION`), state schema version 1, config schema
 version 1.
 
 ## Contents
@@ -71,7 +71,7 @@ Source: `src/engine/simulation.ts`, `src/engine/pipeline.ts`.
    any system runs, and every event emitted during the step is stamped with `t'`.
 2. The pipeline runs in the fixed order below. Systems mutate the state in place.
 3. All [invariants](#invariants) and the event sequence are checked (unless the
-   civilization runs with `INVARIANT_CHECKS=off`). A violation halts the simulation.
+   server runs with `INVARIANT_CHECKS=off`, which skips this per-step check only). A violation halts the simulation.
 4. If `t' mod metricsInterval = 0`, a metric sample is computed from the final state
    of the step.
 
@@ -557,10 +557,9 @@ no congestion and every citizen walks at the same speed.
 
 Source: `src/invariants/check.ts`. `checkInvariants(state)` runs after genesis, after
 every step and whenever a state is deserialised (snapshot restore, checkpoint load).
-With `INVARIANT_CHECKS=off` (a server setting meant for benchmarks only) **all** of these
-checks are skipped, including those at genesis and on restore: a stored state that
-passes the schema and hash checks but violates an invariant is then loaded without
-complaint. Up to 50 violations are reported; any violation throws
+With `INVARIANT_CHECKS=off` (a server setting meant for benchmarks only) the checks after
+each step are skipped; genesis and every deserialised state (snapshot restore, checkpoint
+load) are still checked, so an impossible stored state is never loaded. Up to 50 violations are reported; any violation throws
 `InvariantViolationError`, which the server records as a halt (see
 [API.md](API.md#halted-civilizations)).
 
