@@ -15,10 +15,14 @@ export const SimulationConfigSchema = z.strictObject({
   daysPerSeason: z.number().int().min(1).max(60).default(7),
   initialWealth: z
     .strictObject({
-      /** Approximate median adult endowment, in cents. */
-      medianCents: z.number().int().min(0).max(100_000_000).default(50_000),
       /**
-       * Dispersion in [0, 0.9]. Each adult's endowment is the median multiplied by the
+       * Mean adult endowment, in cents (elders receive 1.3×). The endowment is this value
+       * times a product of four independent factors with mean 1, so it is the expected
+       * value; the median is lower (≈ 0.85× at spread 0.5) because the product is skewed.
+       */
+      meanCents: z.number().int().min(0).max(100_000_000).default(50_000),
+      /**
+       * Dispersion in [0, 0.9]. Each adult's endowment is meanCents multiplied by the
        * product of four uniform factors drawn from [1 − spread, 1 + spread].
        */
       spread: z.number().min(0).max(0.9).default(0.5),

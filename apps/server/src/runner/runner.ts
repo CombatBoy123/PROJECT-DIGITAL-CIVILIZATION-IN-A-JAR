@@ -10,6 +10,7 @@ import {
   type StepResult,
 } from '@civ/sim-core';
 import type { CivilizationStatus } from '@civ/shared';
+import type { Prisma } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
 import { AppError } from '../http/errors.js';
 import { captureState, type EncodedState } from '../persistence/codec.js';
@@ -27,12 +28,27 @@ export interface RunnerSettings {
   sliceBudgetMs: number;
 }
 
+/** The persistence operations a runner needs (a subset of CivilizationStore, fakeable in tests). */
+export type RunnerStore = Pick<
+  CivilizationStore,
+  | 'writeCheckpoint'
+  | 'updateRuntime'
+  | 'audit'
+  | 'recordHalt'
+  | 'loadCheckpoint'
+  | 'createSnapshot'
+  | 'loadSnapshot'
+  | 'rewind'
+  | 'deleteCivilization'
+>;
+
 /** Buffered metric samples that force a checkpoint. */
 const MAX_BUFFERED_METRICS = 5000;
 /** Longest pause between slices while running at a finite speed. */
 const MAX_SLICE_DELAY_MS = 50;
 
 export type RunnerNotice =
+  /** Ticks were executed in memory. The events are live: not yet durable. */
   | { type: 'advanced'; tick: number; events: readonly SimEvent[] }
   | { type: 'status' }
   | { type: 'checkpoint'; tick: number }
@@ -56,9 +72,28 @@ export interface RunnerInit {
   status: CivilizationStatus;
   speed: number;
   haltReason: string | null;
-  store: CivilizationStore;
+  store: RunnerStore;
   settings: RunnerSettings;
   log: FastifyBaseLogger;
+}
+
+/** Why the engine stopped: invariant violations, or an unexpected engine exception. */
+interface HaltRecord {
+  reason: string;
+  tick: number;
+  details: Prisma.InputJsonObject;
+}
+
+function haltRecord(err: unknown, tick: number): HaltRecord {
+  if (err instanceof InvariantViolationError) {
+    return {
+      reason: err.message,
+      tick: err.tick,
+      details: { violations: err.violations as unknown as Prisma.InputJsonValue[] },
+    };
+  }
+  const reason = `Engine error at tick ${tick}: ${message(err)}`;
+  return { reason, tick, details: { engineError: message(err) } };
 }
 
 function message(err: unknown): string {
@@ -85,19 +120,24 @@ export class SimulationRunner {
 
   private pendingEvents: SimEvent[] = [];
   private pendingMetrics: MetricSample[] = [];
+  /** A halt that is not yet recorded in the database. */
+  private unrecordedHalt: HaltRecord | null = null;
   private readonly projection = new ProjectionTracker();
   private readonly queue = new SerialQueue();
   private readonly listeners = new Set<(notice: RunnerNotice) => void>();
-  private readonly store: CivilizationStore;
+  private readonly store: RunnerStore;
   private readonly settings: RunnerSettings;
   private readonly log: FastifyBaseLogger;
 
+  /** True while the background loop should keep running; slices re-check it after every await. */
+  private looping = false;
   private timer: NodeJS.Timeout | null = null;
   private tickDebt = 0;
   private lastSliceAt = 0;
   private lastFlushAt = 0;
   private flushing: Promise<void> | null = null;
   private disposed = false;
+  private lastUsedAt = performance.now();
 
   constructor(init: RunnerInit) {
     this.id = init.id;
@@ -110,7 +150,7 @@ export class SimulationRunner {
     this.settings = init.settings;
     this.log = init.log.child({ civilizationId: init.id });
     // The database projection was written together with the checkpoint we loaded.
-    this.projection.delta(this.simulation.state);
+    this.projection.prime(this.simulation.state);
     this.lastFlushAt = performance.now();
     if (this.status === 'running') this.startLoop();
   }
@@ -119,6 +159,30 @@ export class SimulationRunner {
 
   get sim(): Simulation {
     return this.simulation;
+  }
+
+  get subscriberCount(): number {
+    return this.listeners.size;
+  }
+
+  /** Whether the runner can be unloaded without losing anything (idle eviction). */
+  get idle(): boolean {
+    return (
+      this.status !== 'running' &&
+      !this.flushing &&
+      !this.unrecordedHalt &&
+      this.pendingEvents.length === 0 &&
+      this.simulation.tick === this.durableTick
+    );
+  }
+
+  /** Milliseconds since the runner was last handed out by the manager. */
+  get idleForMs(): number {
+    return performance.now() - this.lastUsedAt;
+  }
+
+  touch(): void {
+    this.lastUsedAt = performance.now();
   }
 
   summary(): RunnerSummary {
@@ -170,20 +234,30 @@ export class SimulationRunner {
     });
   }
 
+  /**
+   * Stop the loop and make the current state durable. Also used to retry
+   * persistence after a failed checkpoint: pausing a paused runner that still has
+   * uncommitted ticks writes them.
+   */
   pause(actor: string): Promise<RunnerSummary> {
     return this.queue.run(async () => {
-      if (this.status !== 'running') return this.summary();
-      this.status = 'paused';
-      this.stopLoop();
-      this.notify({ type: 'status' });
-      await this.checkpoint();
-      await this.store.audit({
-        civilizationId: this.id,
-        action: 'simulation.paused',
-        actor,
-        tick: this.simulation.tick,
-        details: {},
-      });
+      this.assertNotDisposed();
+      const wasRunning = this.status === 'running';
+      if (wasRunning) {
+        this.status = 'paused';
+        this.stopLoop();
+        this.notify({ type: 'status' });
+      }
+      if (this.status === 'paused' && this.hasUncommitted()) await this.checkpoint();
+      if (wasRunning) {
+        await this.store.audit({
+          civilizationId: this.id,
+          action: 'simulation.paused',
+          actor,
+          tick: this.simulation.tick,
+          details: {},
+        });
+      }
       return this.summary();
     });
   }
@@ -198,10 +272,15 @@ export class SimulationRunner {
       let remaining = count;
       while (remaining > 0 && this.status === 'paused') {
         remaining -= this.advance(remaining, performance.now() + this.settings.sliceBudgetMs);
+        if (this.status !== 'paused') break;
         if (this.bufferFull()) await this.checkpoint();
         if (remaining > 0) await yieldToEventLoop();
       }
-      if (this.status === 'paused') await this.checkpoint();
+      if (this.unrecordedHalt) {
+        await this.recordHalt();
+        return this.summary();
+      }
+      await this.checkpoint();
       await this.store.audit({
         civilizationId: this.id,
         action: 'simulation.stepped',
@@ -215,6 +294,7 @@ export class SimulationRunner {
 
   setSpeed(ticksPerSecond: number, actor: string): Promise<RunnerSummary> {
     return this.queue.run(async () => {
+      this.assertNotDisposed();
       await this.store.updateRuntime(this.id, { speed: ticksPerSecond });
       this.speed = ticksPerSecond;
       this.tickDebt = 0;
@@ -242,6 +322,7 @@ export class SimulationRunner {
   /** Rewind to a snapshot on the current timeline. Destructive: later history is removed. */
   restoreSnapshot(snapshotId: string, actor: string): Promise<RunnerSummary> {
     return this.queue.run(async () => {
+      this.assertNotDisposed();
       const { simulation, name, tick } = await this.store.loadSnapshot(this.id, snapshotId, {
         invariants: this.settings.invariants,
       });
@@ -249,11 +330,11 @@ export class SimulationRunner {
       await this.replaceWorld(simulation, {
         events: [],
         metrics: [],
-        truncate: { fromSeq: simulation.state.nextEventSeq, afterTick: tick },
+        truncate: { fromSeq: simulation.state.nextEventSeq, fromTick: tick + 1 },
         audit: {
           action: 'snapshot.restored',
           actor,
-          details: { snapshotId, name, fromTick, toTick: tick },
+          details: { snapshotId, name, fromTick, toTick: tick, stateHash: simulation.hash() },
         },
       });
       return this.summary();
@@ -263,6 +344,7 @@ export class SimulationRunner {
   /** Regenerate the world from the same seed and configuration. Destructive. */
   reset(actor: string): Promise<RunnerSummary> {
     return this.queue.run(async () => {
+      this.assertNotDisposed();
       const { seed, config } = this.simulation.state;
       const { simulation, genesis } = Simulation.create(seed, config, {
         invariants: this.settings.invariants,
@@ -271,7 +353,7 @@ export class SimulationRunner {
       await this.replaceWorld(simulation, {
         events: genesis.events,
         metrics: genesis.metrics ? [genesis.metrics] : [],
-        truncate: { fromSeq: 1, afterTick: -1 },
+        truncate: { fromSeq: 1, fromTick: 0 },
         audit: {
           action: 'simulation.reset',
           actor,
@@ -285,26 +367,40 @@ export class SimulationRunner {
   /** Persist everything and stop the loop (server shutdown). The stored status is kept. */
   shutdown(): Promise<void> {
     return this.queue.run(async () => {
+      if (this.disposed) return;
       this.stopLoop();
-      if (
-        !this.disposed &&
-        this.status !== 'halted' &&
-        (this.pendingEvents.length > 0 || this.simulation.tick !== this.durableTick)
-      ) {
+      if (this.unrecordedHalt) {
+        await this.recordHalt();
+      } else if (this.status !== 'halted' && this.hasUncommitted()) {
         await this.checkpoint().catch((err: unknown) =>
           this.log.error({ err }, 'Final checkpoint failed'),
         );
       }
+      while (this.flushing) await this.flushing.catch(() => undefined);
       this.disposed = true;
+      this.listeners.clear();
     });
   }
 
-  /** Stop and detach (civilization deleted). Runs on the control queue. */
-  dispose(): Promise<void> {
+  /**
+   * Delete the civilization (serialised with every other control operation). On
+   * success the runner is disposed and subscribers receive `deleted`.
+   */
+  destroy(actor: string, details: Prisma.InputJsonValue): Promise<void> {
     return this.queue.run(async () => {
+      this.assertNotDisposed();
+      const wasLooping = this.looping;
       this.stopLoop();
       while (this.flushing) await this.flushing.catch(() => undefined);
+      try {
+        await this.store.deleteCivilization(this.id, actor, details);
+      } catch (err) {
+        if (wasLooping && this.status === 'running') this.startLoop();
+        throw err;
+      }
       this.disposed = true;
+      this.pendingEvents = [];
+      this.pendingMetrics = [];
       this.notify({ type: 'deleted' });
       this.listeners.clear();
     });
@@ -312,14 +408,22 @@ export class SimulationRunner {
 
   // ---------------------------------------------------------------- internals
 
-  private assertUsable(): void {
+  private assertNotDisposed(): void {
     if (this.disposed) throw new AppError('NOT_FOUND', 'Civilization not found');
+  }
+
+  private assertUsable(): void {
+    this.assertNotDisposed();
     if (this.status === 'halted') {
       throw new AppError(
         'HALTED',
         `Simulation halted: ${this.haltReason ?? 'invariant violation'}. Restore a snapshot or reset.`,
       );
     }
+  }
+
+  private hasUncommitted(): boolean {
+    return this.pendingEvents.length > 0 || this.simulation.tick !== this.durableTick;
   }
 
   private bufferFull(): boolean {
@@ -331,12 +435,16 @@ export class SimulationRunner {
 
   private startLoop(): void {
     this.stopLoop();
+    this.looping = true;
     this.tickDebt = 0;
     this.lastSliceAt = performance.now();
+    // The state is durable (or retried) when the loop starts; the interval counts from here.
+    this.lastFlushAt = this.lastSliceAt;
     this.schedule(0);
   }
 
   private stopLoop(): void {
+    this.looping = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
@@ -344,13 +452,20 @@ export class SimulationRunner {
   private schedule(delayMs: number): void {
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.slice();
+      this.slice().catch((err: unknown) => {
+        // Defensive: slice() handles its own failures; never let one crash the process.
+        this.log.error({ err }, 'Runner loop failed');
+        this.stopLoop();
+        this.status = this.status === 'running' ? 'paused' : this.status;
+        this.lastError = `Runner loop failed: ${message(err)}`;
+        this.notify({ type: 'status' });
+      });
     }, delayMs);
   }
 
   /** One slice of the background loop. */
   private async slice(): Promise<void> {
-    if (this.status !== 'running' || this.disposed) return;
+    if (!this.looping || this.status !== 'running' || this.disposed) return;
     const now = performance.now();
     let budget = Number.POSITIVE_INFINITY;
     if (this.speed > 0) {
@@ -364,7 +479,11 @@ export class SimulationRunner {
     this.lastSliceAt = now;
     const ran = this.advance(budget, now + this.settings.sliceBudgetMs);
     if (this.speed > 0) this.tickDebt -= ran;
-    if (this.status !== 'running') return;
+    if (this.unrecordedHalt) {
+      void this.queue.run(() => this.recordHalt());
+      return;
+    }
+    if (!this.looping) return;
 
     if (this.bufferFull()) {
       // Backpressure: no further ticks until the buffer is durable.
@@ -375,7 +494,7 @@ export class SimulationRunner {
     ) {
       void this.checkpoint().catch(() => undefined);
     }
-    if (this.status !== 'running' || this.timer || this.disposed) return;
+    if (!this.looping || this.status !== 'running' || this.timer || this.disposed) return;
     const delay =
       this.speed > 0
         ? Math.min(MAX_SLICE_DELAY_MS, Math.max(0, ((1 - this.tickDebt) * 1000) / this.speed))
@@ -392,11 +511,9 @@ export class SimulationRunner {
       try {
         result = this.simulation.step();
       } catch (err) {
-        if (err instanceof InvariantViolationError) {
-          this.halt(err);
-          break;
-        }
-        throw err;
+        // Any engine exception leaves the in-memory state unusable; treat it as a halt.
+        this.halt(haltRecord(err, this.simulation.tick));
+        break;
       }
       ran++;
       for (const e of result.events) {
@@ -411,46 +528,43 @@ export class SimulationRunner {
   }
 
   /**
-   * An invariant failed: the in-memory state is impossible. Stop, drop the
-   * uncommitted buffers (they cannot be committed without a consistent state),
-   * record the halt, and reload the last durable checkpoint into memory.
+   * The engine failed (an invariant violation, or an unexpected exception): the
+   * in-memory state is impossible or unknown. Stop and drop the
+   * uncommitted buffers (they cannot be committed without a consistent state).
+   * The halt is recorded and the last durable checkpoint reloaded by recordHalt(),
+   * which runs on the control queue.
    */
-  private halt(err: InvariantViolationError): void {
+  private halt(record: HaltRecord): void {
     this.stopLoop();
     this.status = 'halted';
-    this.haltReason = err.message;
+    this.haltReason = record.reason;
+    this.unrecordedHalt = record;
     this.pendingEvents = [];
     this.pendingMetrics = [];
-    this.log.error(
-      { violations: err.violations, tick: err.tick },
-      'Simulation halted by invariant violation',
-    );
+    this.log.error({ tick: record.tick, details: record.details }, 'Simulation halted');
     this.notify({ type: 'status' });
-    void this.queue.run(async () => {
-      try {
-        while (this.flushing) await this.flushing.catch(() => undefined);
-        await this.store.updateRuntime(this.id, { status: 'halted', haltReason: err.message });
-        await this.store.audit({
-          civilizationId: this.id,
-          action: 'simulation.halted',
-          actor: 'engine',
-          tick: err.tick,
-          details: { violations: err.violations as unknown as object[] },
-        });
-        const { simulation } = await this.store.loadCheckpoint(this.id, {
-          invariants: this.settings.invariants,
-        });
-        this.simulation = simulation;
-        this.durableTick = simulation.tick;
-        this.projection.reset();
-        this.projection.delta(simulation.state);
-        this.notify({ type: 'reset', tick: simulation.tick });
-      } catch (persistErr) {
-        this.lastError = `Failed to record halt: ${message(persistErr)}`;
-        this.log.error({ err: persistErr }, 'Failed to record halt');
-        this.notify({ type: 'status' });
-      }
-    });
+  }
+
+  /** Persist a pending halt and reload the last durable state. Runs on the control queue. */
+  private async recordHalt(): Promise<void> {
+    const record = this.unrecordedHalt;
+    if (!record || this.disposed) return;
+    try {
+      while (this.flushing) await this.flushing.catch(() => undefined);
+      await this.store.recordHalt({ civilizationId: this.id, ...record });
+      this.unrecordedHalt = null;
+      const { simulation } = await this.store.loadCheckpoint(this.id, {
+        invariants: this.settings.invariants,
+      });
+      this.simulation = simulation;
+      this.durableTick = simulation.tick;
+      this.projection.prime(simulation.state);
+      this.notify({ type: 'reset', tick: simulation.tick });
+    } catch (persistErr) {
+      this.lastError = `Failed to record halt: ${message(persistErr)}`;
+      this.log.error({ err: persistErr }, 'Failed to record halt');
+      this.notify({ type: 'status' });
+    }
   }
 
   /**
@@ -482,10 +596,11 @@ export class SimulationRunner {
       this.notify({ type: 'checkpoint', tick: encoded.tick });
       return encoded;
     } catch (err) {
-      // Keep everything in memory; the next checkpoint retries with a full projection write.
+      // Keep everything in memory (older buffers first); the next checkpoint retries
+      // with a full projection rebuild.
       this.pendingEvents = events.concat(this.pendingEvents);
       this.pendingMetrics = metrics.concat(this.pendingMetrics);
-      this.projection.reset();
+      this.projection.invalidate();
       this.lastError = `Checkpoint failed: ${message(err)}`;
       this.log.error({ err }, 'Checkpoint failed');
       if (this.status === 'running') {
@@ -504,14 +619,15 @@ export class SimulationRunner {
     change: {
       events: readonly SimEvent[];
       metrics: readonly MetricSample[];
-      truncate: { fromSeq: number; afterTick: number };
-      audit: { action: string; actor: string; details: Record<string, unknown> };
+      truncate: { fromSeq: number; fromTick: number };
+      audit: { action: string; actor: string; details: Prisma.InputJsonValue };
     },
   ): Promise<void> {
+    const wasLooping = this.looping;
     this.stopLoop();
     while (this.flushing) await this.flushing.catch(() => undefined);
     const encoded = captureState(next.state);
-    const projection = this.projection.delta(next.state, true);
+    const projection = new ProjectionTracker().delta(next.state, true);
     try {
       await this.store.rewind({
         civilizationId: this.id,
@@ -520,23 +636,18 @@ export class SimulationRunner {
         events: change.events,
         metrics: change.metrics,
         truncate: change.truncate,
-        audit: {
-          action: change.audit.action,
-          actor: change.audit.actor,
-          details: change.audit.details as never,
-        },
+        audit: change.audit,
       });
     } catch (err) {
-      // Nothing changed in the database; re-sync the tracker with the current world.
-      this.projection.reset();
-      this.projection.delta(this.simulation.state);
-      this.projection.reset();
-      if (this.status === 'running') this.startLoop();
+      // Nothing changed in the database; carry on with the current world.
+      if (wasLooping && this.status === 'running') this.startLoop();
       throw err;
     }
     this.simulation = next;
     this.pendingEvents = [];
     this.pendingMetrics = [];
+    this.unrecordedHalt = null;
+    this.projection.prime(next.state);
     this.durableTick = next.tick;
     this.status = 'paused';
     this.haltReason = null;

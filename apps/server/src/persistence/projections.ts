@@ -1,4 +1,4 @@
-import { SKILLS, type WorldState } from '@civ/sim-core';
+import { SKILLS, type DeepReadonly, type WorldState } from '@civ/sim-core';
 import { toDbEnum } from './mappers.js';
 import { upsertRows, type TableSpec, type Tx } from './sql.js';
 
@@ -67,6 +67,9 @@ const CITIZEN_SKILL: TableSpec = {
   columns: [CIV, { name: 'citizen_id' }, { name: 'skill', cast: '"Skill"' }, { name: 'level' }],
 };
 
+/** Read-only view of the engine state (what `Simulation.state` exposes). */
+type View = DeepReadonly<WorldState>;
+
 /** Row content without the civilization id and the updated tick (used for change detection). */
 type Content = unknown[];
 
@@ -75,18 +78,18 @@ interface Entry {
   content: Content;
 }
 
-function buildingEntries(state: Readonly<WorldState>): Entry[] {
+function buildingEntries(state: View): Entry[] {
   return state.buildings.map((b) => ({
     key: `b:${b.id}`,
     content: [b.id, toDbEnum(b.kind), b.name, b.x, b.y, b.width, b.height, b.capacity],
   }));
 }
 
-function householdEntries(state: Readonly<WorldState>): Entry[] {
+function householdEntries(state: View): Entry[] {
   return state.households.map((h) => ({ key: `h:${h.id}`, content: [h.id, h.homeId] }));
 }
 
-function citizenEntries(state: Readonly<WorldState>): Entry[] {
+function citizenEntries(state: View): Entry[] {
   return state.citizens.map((c) => ({
     key: `c:${c.id}`,
     content: [
@@ -112,7 +115,7 @@ function citizenEntries(state: Readonly<WorldState>): Entry[] {
   }));
 }
 
-function skillEntries(state: Readonly<WorldState>): Entry[] {
+function skillEntries(state: View): Entry[] {
   const out: Entry[] = [];
   for (const c of state.citizens) {
     for (const skill of SKILLS) {
@@ -135,21 +138,29 @@ export interface ProjectionDelta {
 /**
  * Tracks what was last written so that each checkpoint only rewrites changed rows.
  * The tracker is updated optimistically when a delta is computed; if the write
- * fails, call reset() so the next delta rewrites every row.
+ * fails, call invalidate() so the next delta rebuilds every row (and drops rows
+ * of entities that no longer exist).
  */
 export class ProjectionTracker {
   private written = new Map<string, string>();
   private primed = false;
 
-  reset(): void {
+  /** Forget what was written: the next delta is a full rebuild. */
+  invalidate(): void {
     this.written.clear();
     this.primed = false;
   }
 
+  /** Record `state` as already written (the database matches it), without producing rows. */
+  prime(state: View): void {
+    this.delta(state, true);
+  }
+
   /** Compute the rows to write. `full` forces a complete rebuild. */
-  delta(state: Readonly<WorldState>, full = false): ProjectionDelta {
-    if (full) this.reset();
-    const isFull = full;
+  delta(state: View, full = false): ProjectionDelta {
+    // An unprimed tracker does not know which rows exist, so it must rebuild everything.
+    const isFull = full || !this.primed;
+    if (isFull) this.written.clear();
     const seen = new Set<string>();
     const changed = (entries: Entry[]): Content[] => {
       const rows: Content[] = [];
@@ -171,7 +182,7 @@ export class ProjectionTracker {
       skills: changed(skillEntries(state)),
       removed: { buildings: [], households: [], citizens: [] },
     };
-    if (this.primed && !isFull) {
+    if (!isFull) {
       for (const key of [...this.written.keys()]) {
         if (seen.has(key)) continue;
         this.written.delete(key);

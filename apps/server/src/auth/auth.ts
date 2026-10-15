@@ -60,6 +60,8 @@ export function registerAuth(app: FastifyInstance, env: Env): void {
 
   app.addHook('onRequest', async (request) => {
     request.principal = { role: 'viewer', actor: 'anonymous' };
+    // CORS preflights carry no credentials; @fastify/cors answers them.
+    if (request.method === 'OPTIONS') return;
     const path = request.url.split('?')[0] ?? '';
     if (!path.startsWith('/api/') || PUBLIC_PATHS.has(path)) return;
 

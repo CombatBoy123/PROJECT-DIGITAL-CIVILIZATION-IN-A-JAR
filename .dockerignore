@@ -1,0 +1,18 @@
+# Keep the build context small and free of secrets and local artefacts.
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+**/*.log
+.git
+.github
+.env
+.env.*
+!.env.example
+**/playwright-report
+**/test-results
+apps/web/e2e/.artifacts
+.DS_Store
+docker-compose.yml
+Dockerfile
+.dockerignore

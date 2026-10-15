@@ -94,8 +94,10 @@ types) used by both the server and the web client.
 │   │   └── test/
 │   └── shared/                 API contract: Zod request/response schemas
 ├── docs/                       architecture, rules, model, API, ops docs
+├── scripts/                    reproduce-demo.ts, Docker entry point, PostgreSQL init
 ├── .github/workflows/          CI
-└── docker-compose.yml          PostgreSQL for development
+├── Dockerfile                  single-container image (server + built web app)
+└── docker-compose.yml          PostgreSQL for development; optional `app` profile
 ```
 
 ## 5. Simulation engine
@@ -210,8 +212,9 @@ ticks are re-simulated identically when the civilization is resumed.
   projection tables, labelled with the tick they represent (`asOfTick`). They
   are at most one checkpoint interval behind a running simulation and exact
   when it is paused.
-- **History** (events, metrics, snapshots, audit): append-only tables, always
-  paginated (keyset cursors) and range-limited.
+- **History** (events, metrics, snapshots, audit): append-only tables. Events and
+  the audit log are keyset-paginated, metric series are range-limited and
+  downsampled to a bounded number of points, and the snapshot list is bounded.
 - **Live view**: the WebSocket stream sends a keyframe on connect, then delta
   frames (only citizens whose position/activity changed) at most `FRAME_RATE`
   times per second, independent of the simulation speed. Slow clients skip
@@ -238,6 +241,7 @@ ticks are re-simulated identically when the civilization is resumed.
 | `world_checkpoint`  | latest durable state blob (gzip), hash, tick                       | PK `civilization_id`                                                   |
 | `snapshot`          | named immutable state blobs                                        | PK `id`; unique (`civilization_id`, `name`)                            |
 | `building`          | projection of buildings (kind, footprint, capacity)                | PK (`civilization_id`, `id`)                                           |
+| `household`         | projection of households (home building)                           | PK (`civilization_id`, `id`); home                                     |
 | `citizen`           | projection of citizens (identity, traits, money, energy, activity) | PK (`civilization_id`, `id`); name, activity, wealth                   |
 | `citizen_skill`     | normalised skill levels                                            | PK (`civilization_id`, `citizen_id`, `skill`)                          |
 | `simulation_event`  | append-only event log                                              | PK (`civilization_id`, `seq`); (`civ`, `tick`), (`civ`, `type`, `seq`) |
@@ -258,7 +262,8 @@ Full column-level documentation lives in [DATABASE.md](DATABASE.md).
 Checked by `checkInvariants` (every tick by default, configurable for
 benchmarks) and by tests:
 
-1. **Clock** — `tick` is a non-negative integer and advances by exactly one per step.
+1. **Clock** — `tick` is a non-negative integer and advances by exactly one per step
+   (by construction in `step()`); no activity starts in the future.
 2. **Identity** — entity ids are unique positive integers, below the next-id counters.
 3. **Money is non-negative** — no balance is negative while credit is disabled.
 4. **Money conservation** — Σ balances = Σ issued − Σ destroyed (ledger totals).
@@ -268,7 +273,15 @@ benchmarks) and by tests:
 7. **Bounded needs** — needs are finite and within [0, 100].
 8. **Life stage** — stored life stage matches the stage implied by age.
 9. **Events** — event `seq` strictly increases; events carry the tick they were emitted in.
-10. **Snapshots** — a restored snapshot's canonical hash equals the stored hash.
+10. **Snapshots** — a restored snapshot's canonical hash equals the stored hash
+    (enforced by `deserializeState`, which also validates the schema).
+11. **Map** — every building lies inside its block and every door on a road.
+12. **Venue capacity** — present plus incoming visitors never exceed a venue's capacity.
+
+Items 1–9 and 11–12 are the codes reported by `checkInvariants` / `checkEventSequence`
+(`CLOCK`, `IDENTITY`, `NEGATIVE_BALANCE`, `MONEY_CONSERVATION`, `HOUSING`, `LOCATION`,
+`NEEDS_BOUNDS`, `LIFE_STAGE`, `EVENT_SEQUENCE`, `MAP`, `VENUE_CAPACITY`); see
+[SIMULATION_RULES.md](SIMULATION_RULES.md#invariants) for the exact conditions.
 
 Planned with Phase 2+: inventories never negative, sales ≤ owned inventory,
 production consumes recipe inputs, every transfer has matching debit and credit.

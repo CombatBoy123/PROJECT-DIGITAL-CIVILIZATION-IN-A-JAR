@@ -4,6 +4,7 @@ import {
   hashString,
   serializeState,
   Simulation,
+  type DeepReadonly,
   type SimulationOptions,
   type WorldState,
 } from '@civ/sim-core';
@@ -20,8 +21,11 @@ export interface EncodedState {
   sizeBytes: number;
 }
 
-/** Synchronous capture (must happen between ticks so the state is consistent). */
-export function captureState(state: Readonly<WorldState>): EncodedState {
+/**
+ * Synchronous capture (must happen between ticks so the state is consistent).
+ * Serialisation only reads the state; the cast drops the readonly view for the engine API.
+ */
+export function captureState(state: DeepReadonly<WorldState>): EncodedState {
   const json = serializeState(state as WorldState);
   return {
     tick: state.tick,

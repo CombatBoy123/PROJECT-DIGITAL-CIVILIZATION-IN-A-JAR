@@ -33,10 +33,33 @@ export interface RewindWrite {
   civilizationId: string;
   encoded: EncodedState;
   projection: ProjectionDelta;
+  /**
+   * History of the abandoned timeline to remove: events with `seq >= fromSeq` and
+   * metric samples with `tick >= fromTick`. A restore keeps everything the restored
+   * state already contains (`fromSeq = nextEventSeq`, `fromTick = tick + 1`); a reset
+   * removes everything (`1`, `0`) and re-inserts the regenerated genesis records.
+   */
+  truncate: { fromSeq: number; fromTick: number };
   /** Events and metrics of the replacement timeline to insert (e.g. genesis on reset). */
   events: readonly SimEvent[];
   metrics: readonly MetricSample[];
   audit: { action: string; actor: string; details: Prisma.InputJsonValue };
+}
+
+/**
+ * A rewind must leave exactly the history that leads to the new state: everything
+ * kept or inserted lies before the state's next event seq / at or before its tick.
+ */
+function assertRewindConsistent(input: RewindWrite): void {
+  const { encoded, truncate, events, metrics } = input;
+  const ok =
+    truncate.fromSeq >= 1 &&
+    truncate.fromSeq <= encoded.nextEventSeq &&
+    truncate.fromTick >= 0 &&
+    truncate.fromTick <= encoded.tick + 1 &&
+    events.every((e) => e.seq >= truncate.fromSeq && e.seq < encoded.nextEventSeq) &&
+    metrics.every((m) => m.tick >= truncate.fromTick && m.tick <= encoded.tick);
+  if (!ok) throw new Error('rewind: replacement history is inconsistent with the target state');
 }
 
 export interface AuditInput {
@@ -240,17 +263,22 @@ export class CivilizationStore {
 
   /**
    * Replace the current timeline with another state (snapshot restore or reset):
-   * removes events and metrics after the new state, detaches snapshots that lie in
-   * the abandoned future, rebuilds projections and the checkpoint.
+   * removes the abandoned history (see RewindWrite.truncate), inserts the
+   * replacement records, detaches snapshots that lie in the abandoned future,
+   * rebuilds projections and the checkpoint, and clears any halt.
    */
   async rewind(input: RewindWrite): Promise<void> {
+    assertRewindConsistent(input);
     const gz = await compress(input.encoded.json);
-    const { civilizationId, encoded } = input;
+    const { civilizationId, encoded, truncate } = input;
     await this.prisma.$transaction(async (tx) => {
+      // event_entity rows cascade with their events.
       await tx.simulationEvent.deleteMany({
-        where: { civilizationId, seq: { gte: BigInt(encoded.nextEventSeq) } },
+        where: { civilizationId, seq: { gte: BigInt(truncate.fromSeq) } },
       });
-      await tx.metricSample.deleteMany({ where: { civilizationId, tick: { gt: encoded.tick } } });
+      await tx.metricSample.deleteMany({
+        where: { civilizationId, tick: { gte: truncate.fromTick } },
+      });
       await this.insertEvents(tx, civilizationId, input.events);
       await this.insertMetrics(tx, civilizationId, input.metrics);
       await tx.snapshot.updateMany({
@@ -274,6 +302,31 @@ export class CivilizationStore {
         tx,
       );
     }, TX_OPTIONS);
+  }
+
+  /** Record an invariant halt: status, reason and audit entry in one transaction. */
+  async recordHalt(input: {
+    civilizationId: string;
+    reason: string;
+    tick: number;
+    details: Prisma.InputJsonValue;
+  }): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.civilization.update({
+        where: { id: input.civilizationId },
+        data: { status: 'HALTED', haltReason: input.reason },
+      });
+      await this.audit(
+        {
+          civilizationId: input.civilizationId,
+          action: 'simulation.halted',
+          actor: 'engine',
+          tick: input.tick,
+          details: input.details,
+        },
+        tx,
+      );
+    });
   }
 
   async createSnapshot(
@@ -360,12 +413,56 @@ export class CivilizationStore {
     actor: string,
     details: Prisma.InputJsonValue,
   ): Promise<void> {
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await this.audit(
+          { civilizationId: null, action: 'civilization.deleted', actor, tick: null, details },
+          tx,
+        );
+        // Snapshots, projections, events, metrics and the checkpoint cascade.
+        await tx.civilization.delete({ where: { id: civilizationId } });
+      }, TX_OPTIONS);
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025')
+        throw notFound('Civilization');
+      throw err;
+    }
+  }
+
+  /**
+   * Civilizations stored as RUNNING when the server starts were interrupted by a
+   * restart or crash (their uncommitted ticks are lost and will be re-simulated
+   * identically). Returns their ids and durable ticks.
+   */
+  async listInterrupted(): Promise<{ id: string; tick: number }[]> {
+    const rows = await this.prisma.civilization.findMany({
+      where: { status: 'RUNNING' },
+      select: { id: true, currentTick: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    return rows.map((r) => ({ id: r.id, tick: r.currentTick }));
+  }
+
+  /** Mark an interrupted civilization as paused, with an audit entry explaining why. */
+  async pauseInterrupted(civilizationId: string, tick: number): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
+      await tx.civilization.update({
+        where: { id: civilizationId },
+        data: { status: 'PAUSED' },
+      });
       await this.audit(
-        { civilizationId: null, action: 'civilization.deleted', actor, tick: null, details },
+        {
+          civilizationId,
+          action: 'simulation.paused_on_restart',
+          actor: 'system',
+          tick,
+          details: {
+            reason: 'The server restarted while the simulation was running',
+            resumedFromTick: tick,
+          },
+        },
         tx,
       );
-      await tx.civilization.delete({ where: { id: civilizationId } });
     });
   }
 }

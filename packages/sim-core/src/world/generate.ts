@@ -217,6 +217,19 @@ function planMap(
   };
 }
 
+/**
+ * Blocks ordered from the map centre outwards: squared distance of the block centre from
+ * the map centre (in half-block units, so integers), ties broken by row then column.
+ */
+function byCentrality(map: WorldMap, blocks: Block[]): Block[] {
+  const distance = (b: Block): number => {
+    const dx = 2 * b.col + 1 - map.cols;
+    const dy = 2 * b.row + 1 - map.rows;
+    return dx * dx + dy * dy;
+  };
+  return [...blocks].sort((a, b) => distance(a) - distance(b) || a.row - b.row || a.col - b.col);
+}
+
 function streetName(roadRow: number): string {
   const word = STREET_WORDS[roadRow % STREET_WORDS.length] as string;
   const suffix =
@@ -266,11 +279,11 @@ function drawSkills(
 
 function drawEndowment(stage: LifeStage, config: SimulationConfig, rng: Rng): number {
   if (stage === 'child') return 0;
-  const { medianCents, spread } = config.initialWealth;
+  const { meanCents, spread } = config.initialWealth;
   let factor = 1;
   for (let i = 0; i < 4; i++) factor *= rng.uniform(1 - spread, 1 + spread);
   if (stage === 'elder') factor *= 1.3;
-  return Math.round(medianCents * factor);
+  return Math.round(meanCents * factor);
 }
 
 /** Generate the genesis world state (tick 0) and its genesis events. */
@@ -298,7 +311,10 @@ export function generateWorld(seed: string, config: SimulationConfig): GenesisRe
   let nextBuildingId = 1;
 
   // Public venues: one per civic block, alternating plaza / park starting from the most central.
-  const civicBlocks = map.blocks.filter((b) => b.zone === 'civic');
+  const civicBlocks = byCentrality(
+    map,
+    map.blocks.filter((b) => b.zone === 'civic'),
+  );
   const usedVenueNames = new Set<string>();
   const uniqueName = (base: string): string => {
     let name = base;
@@ -326,7 +342,10 @@ export function generateWorld(seed: string, config: SimulationConfig): GenesisRe
   });
 
   // Houses: fill residential lots, closest-to-centre blocks first, in a fixed lot order.
-  const residentialBlocks = map.blocks.filter((b) => b.zone === 'residential');
+  const residentialBlocks = byCentrality(
+    map,
+    map.blocks.filter((b) => b.zone === 'residential'),
+  );
   const lotOffsets = [
     [0, 0],
     [LOT_SIZE, 0],

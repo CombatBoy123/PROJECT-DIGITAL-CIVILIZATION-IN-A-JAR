@@ -39,12 +39,17 @@ describe('Rng', () => {
     const rng = new Rng(cyrb128('uniformity'));
     const buckets = new Array<number>(10).fill(0);
     const n = 100_000;
+    let min = 1;
+    let max = 0;
     for (let i = 0; i < n; i++) {
       const x = rng.next();
-      expect(x).toBeGreaterThanOrEqual(0);
-      expect(x).toBeLessThan(1);
+      if (x < min) min = x;
+      if (x > max) max = x;
       buckets[Math.floor(x * 10)]! += 1;
     }
+    // One assertion per bound instead of per draw keeps this test fast.
+    expect(min).toBeGreaterThanOrEqual(0);
+    expect(max).toBeLessThan(1);
     for (const count of buckets) expect(Math.abs(count - n / 10)).toBeLessThan(n / 100);
   });
 

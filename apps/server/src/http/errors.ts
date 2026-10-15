@@ -60,10 +60,26 @@ function body(code: ErrorCode, message: string, details?: unknown): ApiErrorBody
     : { error: { code, message, details } };
 }
 
+export interface ErrorHandlingOptions {
+  /**
+   * Serve `index.html` (via @fastify/static's `sendFile`) for unknown non-API GET
+   * routes, so client-side routes of the single-page app survive a reload.
+   */
+  spaFallback?: boolean;
+}
+
+function isApiPath(path: string): boolean {
+  return path === '/api' || path.startsWith('/api/');
+}
+
 /** Consistent error responses: { error: { code, message, details? } }. */
-export function registerErrorHandling(app: FastifyInstance): void {
+export function registerErrorHandling(
+  app: FastifyInstance,
+  options: ErrorHandlingOptions = {},
+): void {
   app.setErrorHandler((err: FastifyError | AppError | ZodError | Error, request, reply) => {
     if (err instanceof AppError) {
+      if (err.statusCode >= 500) request.log.error({ err }, err.message);
       return reply.status(err.statusCode).send(body(err.code, err.message, err.details));
     }
     if (err instanceof ZodError) {
@@ -90,8 +106,14 @@ export function registerErrorHandling(app: FastifyInstance): void {
   });
 
   app.setNotFoundHandler((request, reply) => {
-    reply
-      .status(404)
-      .send(body('NOT_FOUND', `Route ${request.method} ${request.url.split('?')[0]} not found`));
+    const path = request.url.split('?')[0] ?? '';
+    if (
+      options.spaFallback &&
+      (request.method === 'GET' || request.method === 'HEAD') &&
+      !isApiPath(path)
+    ) {
+      return reply.type('text/html; charset=utf-8').sendFile('index.html');
+    }
+    return reply.status(404).send(body('NOT_FOUND', `Route ${request.method} ${path} not found`));
   });
 }
