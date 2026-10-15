@@ -1,0 +1,39 @@
+{
+  "name": "@civ/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fastify API, simulation runners and persistence for Digital Civilization in a Jar.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch --conditions=source --env-file-if-exists=../../.env src/index.ts",
+    "start": "node --env-file-if-exists=../../.env dist/index.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "prisma generate",
+    "db:migrate": "node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js migrate deploy",
+    "db:migrate:dev": "node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js migrate dev",
+    "db:reset": "node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js migrate reset --force",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@civ/shared": "workspace:*",
+    "@civ/sim-core": "workspace:*",
+    "@fastify/cors": "11.3.1",
+    "@fastify/static": "10.1.6",
+    "@fastify/websocket": "11.3.4",
+    "@prisma/client": "6.19.3",
+    "fastify": "5.12.7",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/ws": "8.18.2",
+    "prisma": "6.19.3",
+    "tsx": "4.23.15",
+    "vitest": "4.1.11",
+    "ws": "8.22.0"
+  }
+}

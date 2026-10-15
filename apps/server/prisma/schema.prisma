@@ -1,0 +1,306 @@
+// Database schema for Digital Civilization in a Jar.
+//
+// Source of truth: the gzip-compressed canonical state blob in `world_checkpoint`
+// (and `snapshot`). The entity tables (`building`, `household`, `citizen`,
+// `citizen_skill`) are projections of that state written in the same transaction
+// as the checkpoint, for indexed querying and SQL analysis. History tables
+// (`simulation_event`, `event_entity`, `metric_sample`, `audit_log`) are append-only.
+// See docs/DATABASE.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CivilizationStatus {
+  PAUSED
+  RUNNING
+  HALTED
+}
+
+enum BuildingKind {
+  HOUSE
+  PLAZA
+  PARK
+}
+
+enum LifeStage {
+  CHILD
+  ADULT
+  ELDER
+}
+
+enum Education {
+  NONE
+  PRIMARY
+  SECONDARY
+  TERTIARY
+}
+
+enum Activity {
+  SLEEPING
+  AT_HOME
+  LEISURE
+  TRAVELING
+}
+
+enum Skill {
+  FARMING
+  BAKING
+  CRAFTING
+  COMMERCE
+  MANAGEMENT
+}
+
+enum EntityKind {
+  CITIZEN
+  BUILDING
+  HOUSEHOLD
+}
+
+/// One simulated society (one experiment run).
+model Civilization {
+  id            String             @id @default(uuid()) @db.Uuid
+  name          String             @unique @db.VarChar(80)
+  seed          String             @db.VarChar(64)
+  status        CivilizationStatus @default(PAUSED)
+  /// Target ticks per real second; 0 means "as fast as possible".
+  speed         Int                @default(4)
+  /// Tick of the latest durable checkpoint.
+  currentTick   Int                @default(0) @map("current_tick")
+  engineVersion String             @map("engine_version") @db.VarChar(32)
+  haltReason    String?            @map("halt_reason")
+  createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  config     SimulationConfig?
+  checkpoint WorldCheckpoint?
+  snapshots  Snapshot[]
+  buildings  Building[]
+  households Household[]
+  citizens   Citizen[]
+  events     SimulationEvent[]
+  metrics    MetricSample[]
+  auditLog   AuditLog[]
+
+  @@index([createdAt])
+  @@map("civilization")
+}
+
+/// Validated simulation parameters (see SimulationConfigSchema in @civ/sim-core).
+model SimulationConfig {
+  civilizationId String   @id @map("civilization_id") @db.Uuid
+  schemaVersion  Int      @map("schema_version")
+  params         Json
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  civilization Civilization @relation(fields: [civilizationId], references: [id], onDelete: Cascade)
+
+  @@map("simulation_config")
+}
+
+/// Latest durable world state. Overwritten at every checkpoint.
+model WorldCheckpoint {
+  civilizationId     String   @id @map("civilization_id") @db.Uuid
+  tick               Int
+  /// First event sequence number not yet used; every event below it is committed.
+  nextEventSeq       BigInt   @map("next_event_seq")
+  stateHash          String   @map("state_hash") @db.VarChar(64)
+  stateSchemaVersion Int      @map("state_schema_version")
+  /// gzip(canonical JSON of WorldState)
+  state              Bytes
+  /// Uncompressed size of the canonical JSON in bytes.
+  sizeBytes          Int      @map("size_bytes")
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  civilization Civilization @relation(fields: [civilizationId], references: [id], onDelete: Cascade)
+
+  @@map("world_checkpoint")
+}
+
+/// Named, immutable copy of a world state.
+model Snapshot {
+  id                 String    @id @default(uuid()) @db.Uuid
+  civilizationId     String    @map("civilization_id") @db.Uuid
+  name               String    @db.VarChar(80)
+  note               String?   @db.VarChar(500)
+  tick               Int
+  nextEventSeq       BigInt    @map("next_event_seq")
+  stateHash          String    @map("state_hash") @db.VarChar(64)
+  stateSchemaVersion Int       @map("state_schema_version")
+  state              Bytes
+  sizeBytes          Int       @map("size_bytes")
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// Set when the civilization was rewound to an earlier tick: the snapshot then belongs to an
+  /// abandoned timeline whose events were removed, so it can no longer be restored in place.
+  detachedAt         DateTime? @map("detached_at") @db.Timestamptz(3)
+
+  civilization Civilization @relation(fields: [civilizationId], references: [id], onDelete: Cascade)
+
+  @@unique([civilizationId, name])
+  @@index([civilizationId, tick])
+  @@map("snapshot")
+}
+
+/// Projection: buildings on the map.
+model Building {
+  civilizationId String       @map("civilization_id") @db.Uuid
+  id             Int
+  kind           BuildingKind
+  name           String       @db.VarChar(80)
+  x              Int
+  y              Int
+  width          Int
+  height         Int
+  /// Residents for houses, visitors for public venues.
+  capacity       Int
+  /// Checkpoint tick at which this row was last written (rows are only rewritten when they change).
+  updatedTick    Int          @map("updated_tick")
+
+  civilization Civilization @relation(fields: [civilizationId], references: [id], onDelete: Cascade)
+  households   Household[]
+  residents    Citizen[]    @relation("CitizenHome")
+  occupants    Citizen[]    @relation("CitizenLocation")
+
+  @@id([civilizationId, id])
+  @@index([civilizationId, kind])
+  @@map("building")
+}
+
+/// Projection: households (people sharing a home).
+model Household {
+  civilizationId String @map("civilization_id") @db.Uuid
+  id             Int
+  homeBuildingId Int    @map("home_building_id")
+  updatedTick    Int    @map("updated_tick")
+
+  civilization Civilization @relation(fields: [civilizationId], references: [id], onDelete: Cascade)
+  home         Building     @relation(fields: [civilizationId, homeBuildingId], references: [civilizationId, id], onDelete: Cascade)
+  members      Citizen[]
+
+  @@id([civilizationId, id])
+  @@index([civilizationId, homeBuildingId])
+  @@map("household")
+}
+
+/// Projection: citizens.
+model Citizen {
+  civilizationId     String    @map("civilization_id") @db.Uuid
+  id                 Int
+  firstName          String    @map("first_name") @db.VarChar(40)
+  lastName           String    @map("last_name") @db.VarChar(40)
+  householdId        Int       @map("household_id")
+  birthTick          Int       @map("birth_tick")
+  lifeStage          LifeStage @map("life_stage")
+  education          Education
+  homeBuildingId     Int       @map("home_building_id")
+  openness           Float
+  conscientiousness  Float
+  extraversion       Float
+  agreeableness      Float
+  neuroticism        Float
+  balanceCents       BigInt    @map("balance_cents")
+  energy             Float
+  activity           Activity
+  /// Null while travelling.
+  locationBuildingId Int?      @map("location_building_id")
+  /// Destination while travelling.
+  destinationId      Int?      @map("destination_id")
+  updatedTick        Int       @map("updated_tick")
+
+  civilization Civilization   @relation(fields: [civilizationId], references: [id], onDelete: Cascade)
+  household    Household      @relation(fields: [civilizationId, householdId], references: [civilizationId, id], onDelete: Cascade)
+  home         Building       @relation("CitizenHome", fields: [civilizationId, homeBuildingId], references: [civilizationId, id], onDelete: Cascade)
+  location     Building?      @relation("CitizenLocation", fields: [civilizationId, locationBuildingId], references: [civilizationId, id], onDelete: NoAction)
+  skills       CitizenSkill[]
+
+  @@id([civilizationId, id])
+  @@index([civilizationId, lastName, firstName])
+  @@index([civilizationId, activity])
+  @@index([civilizationId, lifeStage])
+  @@index([civilizationId, balanceCents])
+  @@index([civilizationId, homeBuildingId])
+  @@index([civilizationId, householdId])
+  @@map("citizen")
+}
+
+/// Projection: citizen skill levels (0–100).
+model CitizenSkill {
+  civilizationId String @map("civilization_id") @db.Uuid
+  citizenId      Int    @map("citizen_id")
+  skill          Skill
+  level          Float
+
+  citizen Citizen @relation(fields: [civilizationId, citizenId], references: [civilizationId, id], onDelete: Cascade)
+
+  @@id([civilizationId, citizenId, skill])
+  @@index([civilizationId, skill, level])
+  @@map("citizen_skill")
+}
+
+/// Append-only simulation event log.
+model SimulationEvent {
+  civilizationId String   @map("civilization_id") @db.Uuid
+  seq            BigInt
+  tick           Int
+  type           String   @db.VarChar(64)
+  /// Sequence number of the event that caused this one, when recorded.
+  causeSeq       BigInt?  @map("cause_seq")
+  payload        Json
+  recordedAt     DateTime @default(now()) @map("recorded_at") @db.Timestamptz(3)
+
+  civilization Civilization  @relation(fields: [civilizationId], references: [id], onDelete: Cascade)
+  entities     EventEntity[]
+
+  @@id([civilizationId, seq])
+  @@index([civilizationId, tick])
+  @@index([civilizationId, type, seq])
+  @@map("simulation_event")
+}
+
+/// Index of entities involved in each event, with their role.
+model EventEntity {
+  civilizationId String     @map("civilization_id") @db.Uuid
+  eventSeq       BigInt     @map("event_seq")
+  entityKind     EntityKind @map("entity_kind")
+  entityId       Int        @map("entity_id")
+  role           String     @db.VarChar(32)
+
+  event SimulationEvent @relation(fields: [civilizationId, eventSeq], references: [civilizationId, seq], onDelete: Cascade)
+
+  @@id([civilizationId, eventSeq, entityKind, entityId, role])
+  @@index([civilizationId, entityKind, entityId, eventSeq])
+  @@map("event_entity")
+}
+
+/// Metric values sampled at a tick. Keys and definitions: METRIC_DEFINITIONS in @civ/sim-core.
+model MetricSample {
+  civilizationId String @map("civilization_id") @db.Uuid
+  tick           Int
+  values         Json
+
+  civilization Civilization @relation(fields: [civilizationId], references: [id], onDelete: Cascade)
+
+  @@id([civilizationId, tick])
+  @@map("metric_sample")
+}
+
+/// Record of control actions (who did what, when). Not simulation history.
+model AuditLog {
+  id             BigInt   @id @default(autoincrement())
+  civilizationId String?  @map("civilization_id") @db.Uuid
+  action         String   @db.VarChar(64)
+  actor          String   @db.VarChar(64)
+  tick           Int?
+  details        Json
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  civilization Civilization? @relation(fields: [civilizationId], references: [id], onDelete: SetNull)
+
+  @@index([civilizationId, createdAt])
+  @@map("audit_log")
+}
