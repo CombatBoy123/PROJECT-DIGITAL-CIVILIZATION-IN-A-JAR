@@ -1,5 +1,5 @@
 import { calendarAt, formatCalendar, type MetricDefinition } from '@civ/sim-core';
-import { useId } from 'react';
+import { useId, useMemo, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -12,14 +12,18 @@ import {
   type TooltipContentProps,
 } from 'recharts';
 import { EmptyState } from '../../components/Feedback';
+import { labelMarkers, valueAxis } from '../../lib/chart-axis';
 import { UNIT_LABELS, formatInteger, formatMetricValue } from '../../lib/format';
+import { useElementWidth } from '../../lib/hooks';
 import type { SeriesPoint } from '../../lib/metrics';
 import { CHART } from './chart-theme';
 
 /*
  * One metric as a single-series area chart (2px line, faint wash), with its written
  * definition and a data-table twin so no value is reachable only by hovering.
- * Season starts are drawn as reference lines on the shared time axis.
+ * Season starts are drawn as reference lines on the shared time axis; only lines
+ * with room for their label are labelled (above the plot, never over the data), and
+ * the tooltip names the season of any hovered tick.
  */
 
 export interface SeasonMarker {
@@ -28,6 +32,11 @@ export interface SeasonMarker {
 }
 
 const CHART_HEIGHT = 170;
+const Y_AXIS_WIDTH = 64;
+const MARGIN = { top: 18, right: 12, bottom: 0, left: 0 };
+/** Season label font size (px) and the matching per-character width estimate. */
+const MARKER_FONT_PX = 10;
+const MARKER_CHAR_PX = 6;
 /** Rows shown in the table view; the full series is in the CSV export. */
 const TABLE_ROWS = 200;
 
@@ -81,6 +90,28 @@ export function MetricChart({
   const latest = points[points.length - 1];
   const unit = definition.unit;
   const areaType = unit === 'code' ? 'stepAfter' : 'linear';
+  const [bodyEl, setBodyEl] = useState<HTMLDivElement | null>(null);
+  const bodyWidth = useElementWidth(bodyEl, 10);
+
+  const axis = useMemo(
+    () =>
+      valueAxis(
+        unit,
+        points.map((p) => p.value),
+      ),
+    [unit, points],
+  );
+  const markers = useMemo(() => {
+    const first = points[0];
+    const last = points[points.length - 1];
+    const span: [number, number] | null =
+      domain ?? (first && last ? [first.tick, last.tick] : null);
+    const plotWidth =
+      bodyWidth === null ? 0 : bodyWidth - Y_AXIS_WIDTH - MARGIN.left - MARGIN.right;
+    return span
+      ? labelMarkers(seasons, span, plotWidth, { charPx: MARKER_CHAR_PX })
+      : seasons.map((marker) => ({ marker, labelled: false }));
+  }, [seasons, domain, points, bodyWidth]);
 
   return (
     <article
@@ -124,12 +155,16 @@ export function MetricChart({
             : ' · raw samples.'}
         </p>
       </details>
-      <div className={`chart-body ${stale ? 'is-stale' : ''}`} style={{ height: CHART_HEIGHT }}>
+      <div
+        ref={setBodyEl}
+        className={`chart-body ${stale ? 'is-stale' : ''}`}
+        style={{ height: CHART_HEIGHT }}
+      >
         {points.length === 0 ? (
           <EmptyState title="No samples in this range" />
         ) : (
           <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-            <AreaChart data={points} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+            <AreaChart data={points} margin={MARGIN}>
               <CartesianGrid vertical={false} stroke={CHART.grid} strokeWidth={1} />
               <XAxis
                 dataKey="tick"
@@ -143,26 +178,33 @@ export function MetricChart({
                 minTickGap={24}
               />
               <YAxis
-                width={64}
-                tickFormatter={(v: number) => formatMetricValue(unit, v, 'axis')}
+                width={Y_AXIS_WIDTH}
+                tickFormatter={axis?.format ?? ((v: number) => formatMetricValue(unit, v, 'axis'))}
                 tick={{ fill: CHART.tickText, fontSize: 11 }}
                 stroke={CHART.axis}
                 tickLine={false}
                 axisLine={false}
-                domain={unit === 'ratio' ? [0, 'auto'] : ['auto', 'auto']}
+                domain={axis?.domain ?? ['auto', 'auto']}
+                ticks={axis?.ticks}
+                interval={0}
               />
-              {seasons.map((s) => (
+              {markers.map(({ marker, labelled }) => (
                 <ReferenceLine
-                  key={s.tick}
-                  x={s.tick}
+                  key={marker.tick}
+                  x={marker.tick}
                   stroke={CHART.reference}
                   strokeWidth={1}
-                  label={{
-                    value: s.label,
-                    position: 'insideTopLeft',
-                    fill: CHART.referenceText,
-                    fontSize: 10,
-                  }}
+                  label={
+                    labelled
+                      ? {
+                          value: marker.label,
+                          position: 'top',
+                          className: 'chart-season-label',
+                          fill: CHART.referenceText,
+                          fontSize: MARKER_FONT_PX,
+                        }
+                      : undefined
+                  }
                 />
               ))}
               <Tooltip

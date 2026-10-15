@@ -27,7 +27,11 @@ pnpm dev                          # server on 127.0.0.1:3001 + web app on http:/
 
 Open <http://localhost:5173>. The Vite dev server proxies `/api` (including the
 WebSocket stream) to the Fastify server. With `.env` as copied, `AUTH_MODE=disabled`
-(allowed only because the server binds to `127.0.0.1`), so no token is needed.
+(allowed only because the server binds to `127.0.0.1`), so no token is needed. In this
+mode the server only answers requests whose `Host` is a loopback name and whose
+`Origin`, if any, is a loopback origin or in `CORS_ORIGINS` (protection against DNS
+rebinding); to open the UI from another device, use token auth
+([DEPLOYMENT.md](DEPLOYMENT.md#authentication)).
 
 ### Database
 
@@ -49,8 +53,10 @@ CREATE DATABASE civ_e2e OWNER civ;
 
 `pnpm db:migrate` reads `DATABASE_URL` from the environment, falling back to `.env`
 (variables already set in the environment take precedence), so other databases are
-migrated with `DATABASE_URL=postgresql://civ:civ@localhost:5432/civ_e2e pnpm db:migrate`.
-The integration tests migrate `civ_test` themselves.
+migrated with `DATABASE_URL=postgresql://civ:civ@localhost:5432/<database> pnpm db:migrate`.
+`pnpm db:migrate:e2e` does this for `civ_e2e` (or `E2E_DATABASE_URL`), and
+`pnpm test:e2e` runs it before Playwright. The integration tests migrate `civ_test`
+themselves.
 
 To start over: `docker compose down -v` deletes the volume (all data), or
 `pnpm --filter @civ/server db:reset` drops and re-migrates the database in
@@ -60,20 +66,21 @@ To start over: `docker compose down -v` deletes the volume (all data), or
 
 Root (`package.json`):
 
-| Script              | Does                                                                                                    |
-| ------------------- | ------------------------------------------------------------------------------------------------------- |
-| `pnpm dev`          | server (`tsx watch`, TypeScript sources) and web app (Vite) in parallel                                 |
-| `pnpm build`        | `pnpm -r build`: sim-core and shared (`tsc` → `dist/`), server (`tsc`), web (type-check + `vite build`) |
-| `pnpm typecheck`    | `tsc --noEmit` in every package                                                                         |
-| `pnpm lint`         | ESLint over the whole repository                                                                        |
-| `pnpm format`       | Prettier, write                                                                                         |
-| `pnpm format:check` | Prettier, check only                                                                                    |
-| `pnpm test`         | Vitest in every package (server tests need `civ_test`)                                                  |
-| `pnpm test:e2e`     | Playwright browser tests (`@civ/web`)                                                                   |
-| `pnpm check`        | `format:check`, `lint`, `typecheck`, `test`                                                             |
-| `pnpm db:migrate`   | `prisma migrate deploy` for `DATABASE_URL`                                                              |
-| `pnpm db:generate`  | regenerate the Prisma client                                                                            |
-| `pnpm benchmark`    | engine tick benchmark (see [TESTING.md](TESTING.md#benchmark))                                          |
+| Script                | Does                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`            | server (`tsx watch`, TypeScript sources) and web app (Vite) in parallel                                 |
+| `pnpm build`          | `pnpm -r build`: sim-core and shared (`tsc` → `dist/`), server (`tsc`), web (type-check + `vite build`) |
+| `pnpm typecheck`      | `tsc --noEmit` in every package                                                                         |
+| `pnpm lint`           | ESLint over the whole repository                                                                        |
+| `pnpm format`         | Prettier, write                                                                                         |
+| `pnpm format:check`   | Prettier, check only                                                                                    |
+| `pnpm test`           | Vitest in every package (server tests need `civ_test`)                                                  |
+| `pnpm test:e2e`       | `db:migrate:e2e`, then the Playwright browser tests (`@civ/web`)                                        |
+| `pnpm check`          | `format:check`, `lint`, `typecheck`, `test`                                                             |
+| `pnpm db:migrate`     | `prisma migrate deploy` for `DATABASE_URL`                                                              |
+| `pnpm db:migrate:e2e` | `pnpm db:migrate` for `civ_e2e` (`E2E_DATABASE_URL` overrides the URL; POSIX shell syntax)              |
+| `pnpm db:generate`    | regenerate the Prisma client                                                                            |
+| `pnpm benchmark`      | engine tick benchmark (see [TESTING.md](TESTING.md#benchmark))                                          |
 
 Per package: `@civ/server` also has `start` (built server), `test:watch`,
 `db:migrate:dev` (create a new migration from `schema.prisma` changes) and `db:reset`;
@@ -144,8 +151,10 @@ Rules that are not linted but reviewed:
 - Round derived floating-point state that is stored (e.g. energy to 1/1000) so
   serialised values stay short and stable.
 - Bump `ENGINE_VERSION` (`src/version.ts`) whenever a change alters results for an
-  existing seed and configuration; bump `STATE_SCHEMA_VERSION` when the serialised
-  state layout changes (old states are then rejected rather than reinterpreted).
+  existing seed and configuration (commit `88d349b` did not, see
+  [ROADMAP.md](ROADMAP.md#known-issues)); bump `STATE_SCHEMA_VERSION` when the
+  serialised state layout changes (old states are then rejected rather than
+  reinterpreted).
 
 ### Money
 
@@ -162,9 +171,17 @@ See [ECONOMIC_MODEL.md](ECONOMIC_MODEL.md).
 - Everything that must be consistent is written in one transaction (see
   [DATABASE.md](DATABASE.md#transaction-boundaries)).
 - Errors are `AppError`s with a code from `ERROR_CODES`; the global handler turns
-  them into `{ error: { code, message, details? } }`.
+  them into `{ error: { code, message, details? } }`. Never put a raw infrastructure
+  error message into an `AppError`, `lastError` or a stream message: use
+  `reportFailure` (`src/http/failure.ts`), which logs the full error with a reference
+  and returns a client-safe summary.
 - The routes the server registers must equal `API_ROUTES` (a test checks this). New
-  endpoints are added to `packages/shared/src/routes.ts` first.
+  endpoints are added to `packages/shared/src/routes.ts` first, with the right `auth`
+  level: authorisation is looked up from that column for the matched route, and a
+  route under `/api` missing from it requires the operator.
+- A control action writes its state change and audit entry in one transaction
+  (`CivilizationStore.updateRuntime` or a checkpoint carrying the audit) and changes the
+  runner's memory only after the commit.
 
 ## Recipes
 
@@ -244,3 +261,8 @@ add a new one. Update [DATABASE.md](DATABASE.md).
   is running; stop it or use it directly.
 - **Integration tests fail to connect**: the server tests use `TEST_DATABASE_URL`
   (default `postgresql://civ:civ@localhost:5432/civ_test`), not `DATABASE_URL`.
+- **`403 FORBIDDEN` "only answers requests addressed to a loopback host"**: with
+  `AUTH_MODE=disabled` you opened the app through a LAN address or another host name;
+  use `localhost`/`127.0.0.1`, or switch to token auth.
+- **Browser tests fail with missing tables**: `civ_e2e` is not migrated; run
+  `pnpm db:migrate:e2e` (or use `pnpm test:e2e`, which does it first).

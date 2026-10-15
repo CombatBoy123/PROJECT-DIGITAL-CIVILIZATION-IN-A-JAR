@@ -6,8 +6,15 @@ configuration and number of ticks** (see
 walkthrough shows that with real values, first with the engine alone and then through
 the API, and explains what reproducibility does and does not promise.
 
-Every number on this page was produced by running the code (engine `0.1.0`,
-Node v22.22.0). Re-run the script to check them on your machine.
+Every number on this page was produced by running the code (engine `0.1.0` as of
+commit `88d349b`, Node v22.22.0) on 2026-10-15. Re-run the script to check them on your
+machine.
+
+> **Results changed in commit `88d349b` without a new `ENGINE_VERSION`.** That commit
+> made outings time- and energy-aware and renumbered houses (see
+> [SIMULATION_RULES.md](SIMULATION_RULES.md#venue-choice)), so every hash and most
+> activity metrics differ from those of earlier `0.1.0` builds, although the version
+> string is the same. Compare hashes only between builds of the same commit or later.
 
 ## 1. Engine-only walkthrough
 
@@ -35,9 +42,9 @@ households 44, citizens 100, money issued 3727849 cents
 
 | Tick | Calendar           | State hash                         |
 | ---- | ------------------ | ---------------------------------- |
-| 0    | Y1 spring D1 00:00 | `be559641669a81cd4e9991ec2ce84e33` |
-| 24   | Y1 spring D2 00:00 | `dcc001af94685f22a06d256bf43b71a3` |
-| 240  | Y1 summer D4 00:00 | `a0aac4798d1ec307007ff36a7c006d26` |
+| 0    | Y1 spring D1 00:00 | `3815410543285c0938f9569f681be08d` |
+| 24   | Y1 spring D2 00:00 | `cc32f72331d7ee6df5eb05e6ca31ffb8` |
+| 240  | Y1 summer D4 00:00 | `1273ba1173fad918ccc81e4d7cf0ac37` |
 
 The hash is `cyrb128` of the canonical JSON of the complete world state (sorted keys,
 no whitespace), so any difference anywhere in the state — one cent, one energy point,
@@ -57,7 +64,7 @@ Ticks 0, 24 and 240 are midnight (everyone asleep); ticks 12 and 228 are noon.
 | `activity.atHome`          | 0        | 74       | 0        | 78       | 0        |
 | `activity.leisure`         | 0        | 18       | 0        | 14       | 0        |
 | `activity.traveling`       | 0        | 8        | 0        | 8        | 0        |
-| `needs.energyMean`         | 76.749   | 90.78    | 86.99    | 90.7875  | 87.5875  |
+| `needs.energyMean`         | 76.749   | 90.78    | 89.06    | 90.7875  | 90.16125 |
 | `money.supply`             | 3727849  | 3727849  | 3727849  | 3727849  | 3727849  |
 | `wealth.medianAdult`       | 44158    | 44158    | 44158    | 44158    | 44158    |
 | `wealth.giniAdult`         | 0.341035 | 0.341035 | 0.341035 | 0.341035 | 0.341035 |
@@ -85,14 +92,14 @@ in these 10 days.
 
 ```
 [1] Second independent run, identical hashes at 0/24/240: true
-[2] Restored from tick 24, continued to tick 240: hash a0aac4798d1ec307007ff36a7c006d26 (matches: true)
+[2] Restored from tick 24, continued to tick 240: hash 1273ba1173fad918ccc81e4d7cf0ac37 (matches: true)
 [3] Same seed, stochastic weather off:
-    tick   0: 816f1b1cf4ec266165b2fbcf413f2fea (same as default: false)
-    tick  24: 17bd7643276ee2cc82c09504ee7aa282 (same as default: false)
-    tick 240: 54ed7ad55fa5d8c57dad4faa467cf6e6 (same as default: false)
+    tick   0: d9bf063f1363a0145e71269afeb9f1cb (same as default: false)
+    tick  24: 5e4faba96ad823476e3527b823e77148 (same as default: false)
+    tick 240: 7a2d284ce2e284ef3bae3ed8a32c021c (same as default: false)
     citizens identical at genesis: true
     citizens whose state differs at tick 240: 8 of 100
-    citizen-hours at venues over ticks 0–240: default 1831, weather off 2109
+    citizen-hours at venues over ticks 0–240: default 1690, weather off 1942
 ```
 
 1. **Repeatability**: an independent second run gives the same hashes.
@@ -103,7 +110,7 @@ in these 10 days.
    hash from tick 0 (the configuration is part of the state, and the genesis day's
    temperature is no longer drawn), although the generated citizens are identical.
    By tick 240, 8 of the 100 citizens are in a different state, and citizens spent
-   2,109 instead of 1,831 hours at venues (no rain or cloud discouraged outings).
+   1,942 instead of 1,690 hours at venues (no rain or cloud discouraged outings).
 
 ## 2. The same run through the API
 
@@ -121,16 +128,17 @@ curl -s -X POST $API/api/civilizations/$ID/control -H 'content-type: application
 # { "tick": 240, "durableTick": 240 }
 
 curl -s $API/api/civilizations/$ID/export/config | jq '{seed, config, exportedAtTick, stateHashAtExport}'
-# "exportedAtTick": 240, "stateHashAtExport": "a0aac4798d1ec307007ff36a7c006d26"
+# "exportedAtTick": 240, "stateHashAtExport": "1273ba1173fad918ccc81e4d7cf0ac37"
 ```
 
-This was run against the production build of the server: the durable state hash at
-tick 240 is `a0aac4798d1ec307007ff36a7c006d26`, identical to the engine-only run.
+This was run against the production build of the server (`AUTH_MODE=token`, on
+2026-10-15): the durable state hash at tick 240 is `1273ba1173fad918ccc81e4d7cf0ac37`,
+identical to the engine-only run.
 Further steps confirmed through the API:
 
-- A snapshot taken at tick 240 recorded `stateHash` `a0aac479…6d26`; after stepping 24
+- A snapshot taken at tick 240 recorded `stateHash` `1273ba11…ac37`; after stepping 24
   more ticks and restoring it (`{"confirm":"Demo One"}`), the exported hash was again
-  `a0aac479…6d26`.
+  `1273ba11…ac37`.
 - The metric series (`GET …/metrics?fromTick=10&toTick=13`) gave
   `activity.leisure` = 10, 17, 18, 15 for ticks 10–13 — the same values the engine
   computes.
@@ -161,7 +169,7 @@ at a given tick.
     "metricsInterval": 1
   },
   "exportedAtTick": 240,
-  "stateHashAtExport": "a0aac4798d1ec307007ff36a7c006d26"
+  "stateHashAtExport": "1273ba1173fad918ccc81e4d7cf0ac37"
 }
 ```
 

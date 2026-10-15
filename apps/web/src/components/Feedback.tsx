@@ -67,6 +67,18 @@ export function Alert({
   );
 }
 
+/**
+ * Why the operator-only controls next to it are unavailable (see useAccess). Give the
+ * disabled controls `aria-describedby={id}` so the reason is announced with them.
+ */
+export function AccessNote({ id, reason }: { id: string; reason: string }) {
+  return (
+    <p id={id} className="access-note" data-testid="access-note">
+      {reason}
+    </p>
+  );
+}
+
 /** Placeholder bars shown while data loads. */
 export function Skeleton({ lines = 3, height }: { lines?: number; height?: number }) {
   return (

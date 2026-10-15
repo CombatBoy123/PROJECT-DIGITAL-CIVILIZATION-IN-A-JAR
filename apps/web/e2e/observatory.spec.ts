@@ -8,6 +8,7 @@ import {
   liveTick,
   openObservatory,
   readTick,
+  stepViaApi,
   uniqueName,
 } from './helpers';
 
@@ -150,4 +151,52 @@ test('reset requires typing the exact name and returns to genesis', async ({ pag
   await expect(dialog).toBeHidden();
   await expectTick(page, 0);
   await expect(page.getByTestId('calendar')).toHaveText('Y1 spring D1 00:00');
+});
+
+test('Space scrolls a focused panel instead of starting the simulation', async ({
+  page,
+  request,
+}) => {
+  civ = await createCivilization(request, uniqueName('E2E Space'));
+  await stepViaApi(request, civ.id, 72);
+  await openObservatory(page, civ.id);
+  const panel = page.locator('#bottom-panel-events');
+  await expect(panel.getByTestId('event-item').first()).toBeVisible();
+  await panel.focus();
+  await page.keyboard.press('Space');
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId('play-pause')).toHaveText('Play');
+  await expect(page.getByTestId('status-pill').first()).toHaveAttribute('data-status', 'paused');
+  await expectTick(page, 72);
+});
+
+test('the audit tab shows a speed change without reloading', async ({ page, request }) => {
+  civ = await createCivilization(request, uniqueName('E2E Audit'));
+  await openObservatory(page, civ.id);
+  await page.getByTestId('tab-audit').click();
+  await page.getByTestId('speed-select').selectOption('25');
+  await expect(page.getByTestId('audit-row').first()).toContainText('simulation.speed_changed');
+});
+
+test('a snapshot validation error replaces the previous server error', async ({
+  page,
+  request,
+}) => {
+  civ = await createCivilization(request, uniqueName('E2E SnapErr'));
+  await openObservatory(page, civ.id);
+  await page.getByTestId('tab-snapshots').click();
+  const name = page.getByTestId('snapshot-name');
+  for (let i = 0; i < 2; i++) {
+    await name.fill('snap-A');
+    await page.getByTestId('snapshot-save').click();
+  }
+  const panel = page.locator('#bottom-panel-snapshots');
+  await expect(panel.getByTestId('error-message')).toContainText('CONFLICT');
+
+  await name.fill('bad/<name>');
+  await page.getByTestId('snapshot-save').click();
+  await expect(panel.locator('.field-error')).toBeVisible();
+  await expect(panel.getByTestId('error-message')).toHaveCount(0);
+  await expect(name).toHaveAttribute('aria-invalid', 'true');
+  await expect(name).toHaveAccessibleDescription(/./);
 });

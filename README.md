@@ -24,35 +24,39 @@ done, verified and outstanding.
   personality, skills and an initial endowment.
 - Rules: seasonal weather (Markov chain) and temperature, ageing and life stages,
   energy, a rule-based daily routine (sleeping, waking, outings to venues with capacity
-  limits, travel times along the road network).
+  limits that must fit before nightfall and the citizen's energy, travel times along the
+  road network).
 - Determinism: keyed random streams per (system, tick, entity), canonical state
   serialisation and hash, no wall-clock or global randomness (enforced by ESLint).
 - Integer-cent money with explicit issuance events and a conservation invariant;
-  eleven invariant classes checked after every tick; an event catalogue with causal
-  links; 17 metrics with written definitions.
+  twelve invariant classes checked at genesis, after every tick and on every restore; an
+  event catalogue with causal links; 17 metrics with written definitions.
 
 **Server** (`apps/server`, Fastify + Prisma + PostgreSQL)
 
 - 25 endpoints including a WebSocket stream, all validated with Zod
   ([docs/API.md](docs/API.md)).
 - Background runners with speed control (1–1000 ticks/s or maximum), single steps,
-  pause; atomic checkpoints (state, events, metrics, projections in one transaction).
+  pause; atomic checkpoints (state, events, metrics, projections in one transaction);
+  every control action commits together with its audit entry.
 - Named snapshots with exact restore, reset to genesis, delete — destructive actions
   require typing the civilization's name; an audit log of every control action.
 - Paginated citizen/building lists and inspectors, keyset-paginated event history,
   downsampled metric series, CSV/NDJSON/JSON exports.
 - Live stream: keyframes and delta frames at a fixed frame rate with backpressure,
-  live events.
-- Token auth (operator/viewer); unauthenticated mode only on loopback; crash recovery
-  and graceful shutdown.
+  live events, connection limits.
+- Token auth (operator/viewer), decided per matched route; unauthenticated mode only on
+  loopback and only for requests addressed to a loopback host (DNS-rebinding safe);
+  crash recovery, recovery from corrupt stored state, graceful shutdown.
 
 **Observatory** (`apps/web`, React + PixiJS + Recharts)
 
 - Civilization list and creation form, an observatory page with the PixiJS world map,
   playback controls, inspectors, event feed, snapshots, a lab tab (reset, exports) and
-  the audit log, and a metrics dashboard with definitions. It is being completed in
-  Phase 1; see [docs/TESTING.md](docs/TESTING.md#browser-appswebe2e-playwright) for
-  what the browser tests cover.
+  the audit log, and a metrics dashboard with definitions. With token auth, operator-only
+  controls are disabled with an explanation for viewers. See
+  [docs/TESTING.md](docs/TESTING.md#browser-appswebe2e-playwright-18-tests) for what the browser
+  tests cover.
 
 ## Quick start
 
@@ -69,11 +73,21 @@ pnpm dev                          # API on http://127.0.0.1:3001, UI on http://l
 ```
 
 Then open <http://localhost:5173>, create a civilization (name, seed, population) and
-press play. Or use the API directly:
+press play. Without tokens the server only answers requests addressed to a loopback host
+(`localhost`, `127.0.0.1`, `[::1]`), so opening the UI through a LAN address needs token
+auth ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#authentication)). Or use the API directly:
 
 ```sh
 curl -s -X POST http://127.0.0.1:3001/api/civilizations -H 'content-type: application/json' \
   -d '{"name":"Demo One","seed":"demo-1","config":{"population":100}}'
+```
+
+Run the tests (the server tests use `civ_test`; `pnpm test:e2e` first migrates `civ_e2e`,
+and Playwright needs Chromium once: `pnpm --filter @civ/web exec playwright install chromium`):
+
+```sh
+pnpm test                         # unit and integration tests
+pnpm test:e2e                     # browser tests (migrates civ_e2e, then runs Playwright)
 ```
 
 Single container (server + built UI, token auth):
@@ -83,17 +97,45 @@ export OPERATOR_TOKEN=$(openssl rand -hex 32)
 docker compose --profile app up -d --build      # http://localhost:3001
 ```
 
+## Using the observatory
+
+- **Create** a civilization with a name, a seed and, under _Advanced parameters_, the
+  [configuration](docs/SIMULATION_RULES.md#configuration-parameters). _Initial wealth
+  mean (cents)_ is the expected adult endowment; the median is about 85 % of it at the
+  default spread of 0.5. A failed submission opens the section with the first invalid
+  field and focuses it.
+- **Playback**: play/pause, single step and speed presets. Keyboard: `Space` toggles
+  play/pause and `.` steps one tick, except while typing, in a dialog, on a button or
+  tab, or while a scrollable panel such as the Events tab has focus (then `Space`
+  scrolls it).
+- **Map**: drag to pan, zoom with the wheel or the buttons, fit to view. Clicking inside
+  a building selects a citizen only when the click lands on the citizen's dot;
+  otherwise it selects the building. On roads and open ground a small tolerance
+  applies.
+- **Dashboard**: every metric with its definition. Season starts are drawn as lines;
+  only the labels that fit without overlapping are shown, above the plot. Head counts
+  use whole-number axis steps and shares are limited to 0–100 %. An invalid custom range
+  shows a prompt instead of the previous range's charts.
+- **Token auth**: enter a token with the header's _Enter access token_ button, which
+  then reads _Operator token_, _Viewer token_, _Invalid token_ or _Token set
+  (unverified)_. The role is learned from the server's answers and remembered per token
+  in the browser; operator-only controls (play, step, speed and their shortcuts, reset,
+  save snapshot, restore, delete, create) are disabled with an explanation for viewers,
+  without a token and for a rejected token. A viewer token is recognised at its first
+  refused operator action. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#authentication).
+
 ## Commands
 
 | Command                                                                | What it does                                                             |
 | ---------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `pnpm install`                                                         | install dependencies (and generate the Prisma client)                    |
 | `pnpm db:migrate`                                                      | apply database migrations to `DATABASE_URL`                              |
+| `pnpm db:migrate:e2e`                                                  | apply migrations to `civ_e2e` (or `E2E_DATABASE_URL`)                    |
 | `pnpm dev`                                                             | run the server and the web app with live reload                          |
 | `pnpm build`                                                           | build every package                                                      |
 | `pnpm check`                                                           | format check, lint, type-check, unit and integration tests               |
 | `pnpm test`                                                            | unit and integration tests (server tests use `civ_test`)                 |
-| `pnpm test:e2e`                                                        | Playwright browser tests (uses `civ_e2e`)                                |
+| `pnpm test:e2e`                                                        | `db:migrate:e2e`, then the Playwright browser tests (on `civ_e2e`)       |
 | `pnpm benchmark`                                                       | engine tick benchmark                                                    |
 | `pnpm --filter @civ/sim-core exec tsx ../../scripts/reproduce-demo.ts` | reproducibility walkthrough ([docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)) |
 

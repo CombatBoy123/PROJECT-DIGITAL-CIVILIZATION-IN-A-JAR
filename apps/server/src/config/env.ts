@@ -27,6 +27,10 @@ export const EnvSchema = z
     CHECKPOINT_INTERVAL_MS: z.coerce.number().int().min(100).max(600_000).default(2000),
     MAX_BUFFERED_EVENTS: z.coerce.number().int().min(100).max(1_000_000).default(20_000),
     FRAME_RATE: z.coerce.number().int().min(1).max(30).default(5),
+    /** Live stream (WebSocket) connections the server accepts in total … */
+    STREAM_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100_000).default(256),
+    /** … and per client address (behind a reverse proxy: per proxy address). */
+    STREAM_MAX_CONNECTIONS_PER_ADDRESS: z.coerce.number().int().min(1).max(100_000).default(32),
     INVARIANT_CHECKS: z.enum(['every-tick', 'off']).default('every-tick'),
     RESUME_RUNNING_ON_START: booleanString.default(false),
     LOG_LEVEL: z

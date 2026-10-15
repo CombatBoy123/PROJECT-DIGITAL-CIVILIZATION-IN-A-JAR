@@ -1,5 +1,5 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import type { AddressInfo } from 'node:net';
+import { connect, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { API_ROUTES, type ApiErrorBody, type MetaResponse } from '@civ/shared';
@@ -8,6 +8,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { listApiRoutes, redactUrl } from '../src/app.js';
+import { requiredAccess } from '../src/auth/auth.js';
 import {
   createCivilization,
   createTestPrisma,
@@ -38,6 +39,47 @@ afterEach(async () => {
 });
 
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+
+/** Status of a raw HTTP/1.1 request (lets the test send absolute-form targets). */
+function rawStatus(port: number, method: string, target: string, body = ''): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1', () => {
+      socket.write(
+        `${method} ${target} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n` +
+          (body
+            ? `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n`
+            : '') +
+          `\r\n${body}`,
+      );
+    });
+    let data = '';
+    socket.on('data', (chunk: Buffer) => {
+      data += chunk.toString('utf8');
+      const line = /^HTTP\/1\.1 (\d{3})/.exec(data);
+      if (line) {
+        resolve(Number(line[1]));
+        socket.destroy();
+      }
+    });
+    socket.on('error', reject);
+  });
+}
+
+/** 101 when a WebSocket upgrade succeeds, else the HTTP status of the refusal. */
+function upgradeStatus(url: string, headers: Record<string, string> = {}): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, { headers });
+    ws.on('open', () => {
+      resolve(101);
+      ws.close();
+    });
+    ws.on('unexpected-response', (req, res) => {
+      resolve(res.statusCode ?? 0);
+      req.destroy(); // ws requires aborting the upgrade request itself
+    });
+    ws.on('error', (err) => reject(err));
+  });
+}
 
 describe('route table', () => {
   it('registers exactly the endpoints of API_ROUTES', async () => {
@@ -171,10 +213,174 @@ describe('authorization', () => {
     expect(text).not.toContain(OPERATOR);
   });
 
+  it('decides access from the matched route, so encoded or absolute-form paths cannot skip it', async () => {
+    app = await startApp(prisma, {
+      AUTH_MODE: 'token',
+      OPERATOR_TOKEN: OPERATOR,
+      VIEWER_TOKEN: VIEWER,
+    });
+    const civ = await createCivilization(app, { name: 'Guarded' }, bearer(OPERATOR));
+    // The router decodes these to /api/... routes.
+    const variants = ['/%61pi', '/ap%69', '/%61%70%69'];
+    for (const prefix of variants) {
+      const cases = [
+        { method: 'GET', url: `${prefix}/civilizations` },
+        { method: 'GET', url: `${prefix}/civilizations/${civ.id}/events` },
+        { method: 'POST', url: `${prefix}/civilizations`, payload: { name: 'Bypass' } },
+        {
+          method: 'POST',
+          url: `${prefix}/civilizations/${civ.id}/control`,
+          payload: { action: 'step' },
+        },
+        {
+          method: 'DELETE',
+          url: `${prefix}/civilizations/${civ.id}`,
+          payload: { confirm: 'Guarded' },
+        },
+      ] as const;
+      for (const c of cases) {
+        const res = await app.inject(c);
+        expect(res.statusCode, `${c.method} ${c.url}`).toBe(401);
+      }
+      // A viewer may read through any spelling but not mutate.
+      const read = await app.inject({ url: `${prefix}/civilizations`, headers: bearer(VIEWER) });
+      expect(read.statusCode).toBe(200);
+      const viewerDelete = await app.inject({
+        method: 'DELETE',
+        url: `${prefix}/civilizations/${civ.id}`,
+        headers: bearer(VIEWER),
+        payload: { confirm: 'Guarded' },
+      });
+      expect(viewerDelete.statusCode).toBe(403);
+    }
+    expect(await prisma.civilization.count()).toBe(1);
+    expect(await prisma.auditLog.count({ where: { actor: 'anonymous' } })).toBe(0);
+
+    // Absolute-form request targets and the WebSocket stream over a real socket.
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const { port } = app.server.address() as AddressInfo;
+    for (const target of [
+      `http://127.0.0.1:${port}/api/civilizations`,
+      `http://127.0.0.1:${port}/%61pi/civilizations`,
+    ]) {
+      expect(await rawStatus(port, 'GET', target), target).toBe(401);
+      expect(await rawStatus(port, 'POST', target, '{"name":"Raw"}'), target).toBe(401);
+    }
+    for (const path of [
+      `/%61pi/civilizations/${civ.id}/stream`,
+      `/api/civilizations/${civ.id}/stream`,
+    ]) {
+      expect(await upgradeStatus(`ws://127.0.0.1:${port}${path}`), path).toBe(401);
+    }
+    expect(await prisma.civilization.count()).toBe(1);
+  });
+
+  it('accepts ?token= only on WebSocket upgrades of the stream route', async () => {
+    app = await startApp(prisma, {
+      AUTH_MODE: 'token',
+      OPERATOR_TOKEN: OPERATOR,
+      VIEWER_TOKEN: VIEWER,
+    });
+    const civ = await createCivilization(app, { name: 'Query' }, bearer(OPERATOR));
+    const cases = [
+      { method: 'GET', url: `/api/civilizations?token=${VIEWER}&x=/stream` },
+      { method: 'GET', url: `/api/civilizations/${civ.id}?q=/stream&token=${OPERATOR}` },
+      {
+        method: 'POST',
+        url: `/api/civilizations/${civ.id}/control?token=${OPERATOR}&q=/stream`,
+        payload: { action: 'step' },
+      },
+      {
+        method: 'DELETE',
+        url: `/api/civilizations/${civ.id}?token=${OPERATOR}&q=/stream`,
+        payload: { confirm: 'Query' },
+      },
+      // The stream route itself without an upgrade.
+      { method: 'GET', url: `/api/civilizations/${civ.id}/stream?token=${OPERATOR}` },
+    ] as const;
+    for (const c of cases) {
+      const res = await app.inject(c);
+      expect(res.statusCode, `${c.method} ${c.url}`).toBe(401);
+    }
+    expect(await prisma.civilization.count()).toBe(1);
+  });
+
+  it('fails closed for unlisted /api routes and leaves non-API routes public', () => {
+    expect(requiredAccess('GET', '/api/civilizations')).toBe('read');
+    expect(requiredAccess('HEAD', '/api/civilizations/:id')).toBe('read');
+    expect(requiredAccess('DELETE', '/api/civilizations/:id')).toBe('operate');
+    expect(requiredAccess('GET', '/api/health')).toBe('public');
+    expect(requiredAccess('GET', '/api/debug/:id')).toBe('operate');
+    expect(requiredAccess('POST', '/api/health')).toBe('operate');
+    expect(requiredAccess('GET', '/*')).toBe('public');
+    expect(requiredAccess('GET', undefined)).toBe('public');
+  });
+
   it('redactUrl hides token values only', () => {
     expect(redactUrl('/api/x/stream?token=abc&y=1')).toBe('/api/x/stream?token=[redacted]&y=1');
     expect(redactUrl('/api/x?a=1&token=abc')).toBe('/api/x?a=1&token=[redacted]');
     expect(redactUrl('/api/x?tokens=1')).toBe('/api/x?tokens=1');
+  });
+});
+
+describe('AUTH_MODE=disabled and DNS rebinding', () => {
+  it('serves only requests addressed to a loopback host', async () => {
+    app = await startApp(prisma);
+    for (const host of [
+      'localhost',
+      'localhost:5173',
+      '127.0.0.1:3001',
+      '[::1]:3001',
+      'ui.localhost',
+    ]) {
+      const res = await app.inject({ url: '/api/civilizations', headers: { host } });
+      expect(res.statusCode, host).toBe(200);
+    }
+    for (const host of [
+      'attacker.example:3001',
+      'attacker.example',
+      '127.0.0.1.attacker.example',
+      'localhost.attacker.example',
+      'evil.com@127.0.0.1',
+      '10.0.0.5:3001',
+    ]) {
+      const read = await app.inject({ url: '/api/civilizations', headers: { host } });
+      expect(read.statusCode, host).toBe(403);
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/civilizations',
+        headers: { host },
+        payload: { name: 'Rebound' },
+      });
+      expect(create.statusCode, host).toBe(403);
+      expect(create.json<ApiErrorBody>().error.code).toBe('FORBIDDEN');
+    }
+    expect(await prisma.civilization.count()).toBe(0);
+  });
+
+  it('rejects browser requests and stream upgrades from foreign origins', async () => {
+    app = await startApp(prisma, { CORS_ORIGINS: 'http://ui.test:8080' });
+    const create = (origin: string, name: string) =>
+      app!.inject({
+        method: 'POST',
+        url: '/api/civilizations',
+        headers: { origin },
+        payload: { name, config: { population: 10 } },
+      });
+    expect((await create('http://attacker.example:3001', 'Foreign')).statusCode).toBe(403);
+    expect((await create('null', 'Opaque')).statusCode).toBe(403);
+    expect((await create('http://localhost:5173', 'Local')).statusCode).toBe(201);
+    expect((await create('http://127.0.0.1:4173', 'Loopback')).statusCode).toBe(201);
+    expect((await create('http://ui.test:8080', 'Listed')).statusCode).toBe(201);
+    expect(await prisma.civilization.count()).toBe(3);
+
+    const civ = await prisma.civilization.findFirstOrThrow({ where: { name: 'Local' } });
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const { port } = app.server.address() as AddressInfo;
+    const url = `ws://127.0.0.1:${port}/api/civilizations/${civ.id}/stream`;
+    expect(await upgradeStatus(url, { origin: 'http://attacker.example' })).toBe(403);
+    expect(await upgradeStatus(url, { host: `attacker.example:${port}` })).toBe(403);
+    expect(await upgradeStatus(url, { origin: 'http://localhost:5173' })).toBe(101);
   });
 });
 

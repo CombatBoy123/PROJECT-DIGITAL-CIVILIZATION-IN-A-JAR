@@ -74,6 +74,9 @@ model Civilization {
   currentTick   Int                @default(0) @map("current_tick")
   engineVersion String             @map("engine_version") @db.VarChar(32)
   haltReason    String?            @map("halt_reason")
+  /// Timeline generation: incremented by every rewind (snapshot restore or reset), in the
+  /// rewind's transaction. Streaming exports compare it between pages to detect a rewind.
+  timeline      Int                @default(0)
   createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt     DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 

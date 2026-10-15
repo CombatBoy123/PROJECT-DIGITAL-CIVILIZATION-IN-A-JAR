@@ -224,7 +224,9 @@ export function DashboardPage({ civilizationId }: { civilizationId: string }) {
   }
 
   const status = stream.status?.status ?? civ.status;
-  const data = metrics.data;
+  // With an invalid custom range the query is disabled but keepPreviousData would still
+  // hand back the last range's series; never present those as the answer to this input.
+  const data = range !== null ? metrics.data : undefined;
   const domain: [number, number] | undefined =
     range && range.fromTick !== undefined && range.toTick !== undefined
       ? [range.fromTick, range.toTick]
@@ -265,11 +267,18 @@ export function DashboardPage({ civilizationId }: { civilizationId: string }) {
           </p>
         )}
       </header>
-      {metrics.isError && <ErrorMessage error={metrics.error} title="Could not load metrics" />}
-      {seasonsQuery.isError && (
+      {range !== null && metrics.isError && (
+        <ErrorMessage error={metrics.error} title="Could not load metrics" />
+      )}
+      {range !== null && seasonsQuery.isError && (
         <ErrorMessage error={seasonsQuery.error} title="Could not load season markers" />
       )}
       <div ref={setGridEl} className="dash-groups">
+        {range === null && (
+          <EmptyState title="No range selected">
+            Charts and events appear once the custom range is valid.
+          </EmptyState>
+        )}
         {metrics.isPending && range !== null && <LoadingRegion label="Loading metrics" lines={6} />}
         {data &&
           GROUPS.map((g) => (

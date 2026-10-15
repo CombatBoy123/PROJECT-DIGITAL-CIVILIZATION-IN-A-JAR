@@ -89,13 +89,23 @@ function toBuildingListItem(b: Building): BuildingListItem {
 }
 
 /**
+ * Prisma's `contains` becomes `ILIKE '%term%'` without escaping the term, so `%` and
+ * `_` would act as wildcards. Escape them (and the escape character itself, a backslash,
+ * PostgreSQL's default LIKE escape) so search terms always match literally.
+ */
+export function escapeLike(term: string): string {
+  return term.replace(/[\\%_]/g, '\\$&');
+}
+
+/**
  * Name search: every whitespace-separated term must match the first or last name
- * (case-insensitive substring). A purely numeric search matches the citizen id exactly.
+ * (case-insensitive literal substring). A purely numeric search matches the citizen
+ * id exactly.
  */
 function citizenSearch(search: string | undefined): Prisma.CitizenWhereInput {
   if (!search) return {};
   if (/^\d{1,9}$/.test(search)) return { id: Number(search) };
-  const terms = search.split(/\s+/).filter(Boolean).slice(0, MAX_SEARCH_TERMS);
+  const terms = search.split(/\s+/).filter(Boolean).slice(0, MAX_SEARCH_TERMS).map(escapeLike);
   return {
     AND: terms.map((term) => ({
       OR: [
@@ -220,7 +230,9 @@ export async function listBuildings(
   const where: Prisma.BuildingWhereInput = {
     civilizationId,
     ...(query.kind ? { kind: toDbEnum<BuildingKind>(query.kind) } : {}),
-    ...(query.search ? { name: { contains: query.search, mode: 'insensitive' } } : {}),
+    ...(query.search
+      ? { name: { contains: escapeLike(query.search), mode: 'insensitive' as const } }
+      : {}),
   };
   return prisma.$transaction(async (tx) => {
     const clock = await readClock(tx, civilizationId);

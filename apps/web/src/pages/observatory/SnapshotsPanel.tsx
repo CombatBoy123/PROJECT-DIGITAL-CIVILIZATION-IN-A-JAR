@@ -1,7 +1,8 @@
 import { CivilizationNameSchema, type SnapshotDto } from '@civ/shared';
 import { useId, useState, type FormEvent } from 'react';
 import { useCreateSnapshot, useRestoreSnapshot, useSnapshots } from '../../api/queries';
-import { EmptyState, ErrorMessage, LoadingRegion } from '../../components/Feedback';
+import { useAccess } from '../../api/useAccess';
+import { AccessNote, EmptyState, ErrorMessage, LoadingRegion } from '../../components/Feedback';
 import { TypedConfirmDialog } from '../../components/Modal';
 import { useToast } from '../../components/Toasts';
 import { formatBytes, formatDateTime, formatInteger, shortHash } from '../../lib/format';
@@ -10,10 +11,12 @@ import { useObservatory } from './context';
 /*
  * Named snapshots: save the current state, list saved states and rewind to one
  * (confirmed by typing the civilization's name; the server checks it again).
- * Detached snapshots belong to a discarded timeline and cannot be restored.
+ * Detached snapshots belong to a discarded timeline and cannot be restored. Saving
+ * and restoring need operator rights (see useAccess); without them both are disabled
+ * and the reason is shown once above the list.
  */
 
-function SaveSnapshotForm() {
+function SaveSnapshotForm({ readOnlyNoteId }: { readOnlyNoteId: string | null }) {
   const { civilizationId } = useObservatory();
   const create = useCreateSnapshot(civilizationId);
   const toast = useToast();
@@ -25,6 +28,8 @@ function SaveSnapshotForm() {
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    // Each submission reports one outcome: forget the previous attempt's server error.
+    create.reset();
     const parsed = CivilizationNameSchema.safeParse(name);
     if (!parsed.success) {
       setNameError(parsed.error.issues[0]?.message ?? 'Invalid name');
@@ -55,10 +60,15 @@ function SaveSnapshotForm() {
           maxLength={80}
           autoComplete="off"
           aria-invalid={nameError ? true : undefined}
+          aria-describedby={nameError ? `${nameId}-error` : undefined}
           data-testid="snapshot-name"
           onChange={(e) => setName(e.target.value)}
         />
-        {nameError && <span className="field-error">{nameError}</span>}
+        {nameError && (
+          <span id={`${nameId}-error`} className="field-error">
+            {nameError}
+          </span>
+        )}
       </div>
       <div className="field grow">
         <label htmlFor={noteId} className="field-label">
@@ -76,7 +86,8 @@ function SaveSnapshotForm() {
       <button
         type="submit"
         className="btn btn-primary"
-        disabled={create.isPending || !name.trim()}
+        disabled={create.isPending || !name.trim() || readOnlyNoteId !== null}
+        aria-describedby={readOnlyNoteId ?? undefined}
         data-testid="snapshot-save"
       >
         {create.isPending ? 'Saving…' : 'Save snapshot'}
@@ -94,7 +105,10 @@ export function SnapshotsPanel() {
   const { civilizationId, civilizationName } = useObservatory();
   const list = useSnapshots(civilizationId);
   const restore = useRestoreSnapshot(civilizationId);
+  const access = useAccess();
   const toast = useToast();
+  const noteId = useId();
+  const readOnlyNoteId = access.canOperate ? null : noteId;
   const [target, setTarget] = useState<SnapshotDto | null>(null);
 
   const close = () => {
@@ -104,7 +118,8 @@ export function SnapshotsPanel() {
 
   return (
     <div className="stack gap-m">
-      <SaveSnapshotForm />
+      {!access.canOperate && access.reason && <AccessNote id={noteId} reason={access.reason} />}
+      <SaveSnapshotForm readOnlyNoteId={readOnlyNoteId} />
       {list.isPending && <LoadingRegion label="Loading snapshots" />}
       {list.isError && <ErrorMessage error={list.error} />}
       {list.data && list.data.items.length === 0 && (
@@ -154,6 +169,8 @@ export function SnapshotsPanel() {
                       <button
                         type="button"
                         className="btn btn-sm"
+                        disabled={readOnlyNoteId !== null}
+                        aria-describedby={readOnlyNoteId ?? undefined}
                         data-testid="snapshot-restore"
                         onClick={() => setTarget(s)}
                       >

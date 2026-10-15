@@ -182,6 +182,55 @@ describe('live stream', () => {
     await waitFor(() => client.closed);
   });
 
+  it('caps connections in total and per client address', async () => {
+    /** 101 when the upgrade succeeds (the socket is returned), else the refusal status. */
+    const open = (id: string) =>
+      new Promise<{ status: number; socket?: WebSocket }>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/api/civilizations/${id}/stream`);
+        ws.on('open', () => resolve({ status: 101, socket: ws }));
+        ws.on('unexpected-response', (req, res) => {
+          resolve({ status: res.statusCode ?? 0 });
+          req.destroy();
+        });
+        ws.on('error', reject);
+      });
+    /** The refusal body (the cap is checked before the upgrade). */
+    const refusal = async (id: string) =>
+      (await app.inject({ url: `/api/civilizations/${id}/stream` })).json<{
+        error: { code: string; message: string };
+      }>().error;
+
+    for (const [round, [limits, expected]] of (
+      [
+        [{ STREAM_MAX_CONNECTIONS_PER_ADDRESS: '2' }, /from this address/],
+        [{ STREAM_MAX_CONNECTIONS: '2' }, /^Too many live stream connections; try again later$/],
+      ] as const
+    ).entries()) {
+      await app.close();
+      app = await startApp(prisma, { FRAME_RATE: '10', ...limits });
+      await app.listen({ host: '127.0.0.1', port: 0 });
+      port = (app.server.address() as AddressInfo).port;
+      const a = await createCivilization(app, { name: `Capped ${round}` });
+      const b = await createCivilization(app, { name: `Other ${round}` });
+
+      const first = await open(a.id);
+      const second = await open(b.id);
+      expect([first.status, second.status]).toEqual([101, 101]);
+      expect((await open(a.id)).status).toBe(503);
+      expect(await refusal(a.id)).toMatchObject({
+        code: 'UNAVAILABLE',
+        message: expect.stringMatching(expected),
+      });
+      // Closing a connection frees its slot (once the server has seen the close).
+      first.socket!.close();
+      await waitFor(async () => (await refusal(a.id)).code !== 'UNAVAILABLE');
+      const again = await open(a.id);
+      expect(again.status).toBe(101);
+      second.socket!.close();
+      again.socket!.close();
+    }
+  });
+
   it('rejects unknown civilizations before the upgrade', async () => {
     const status = await new Promise<number>((resolve) => {
       const ws = new WebSocket(

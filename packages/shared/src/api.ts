@@ -34,6 +34,8 @@ export const ERROR_CODES = [
   'CONFIRMATION_REQUIRED',
   'HALTED',
   'INTERNAL',
+  /** The server is at capacity (e.g. too many live stream connections); retry later. */
+  'UNAVAILABLE',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -98,8 +100,22 @@ export const CreateSnapshotRequestSchema = z.strictObject({
   note: z.string().trim().max(500).optional(),
 });
 
-const optionalInt = (min: number, max: number) =>
-  z.coerce.number().int().min(min).max(max).optional();
+/**
+ * An integer query parameter. Strings must be plain decimal digits (surrounding
+ * whitespace is ignored), so an empty or blank value such as `?toTick=` is rejected
+ * instead of being coerced to 0; numbers are accepted as they are.
+ */
+const queryInt = (min: number, max: number) =>
+  z.preprocess(
+    (value) => {
+      if (typeof value !== 'string') return value;
+      const trimmed = value.trim();
+      return /^\d{1,16}$/.test(trimmed) ? Number(trimmed) : value;
+    },
+    z.number({ error: 'Expected a non-negative integer' }).int().min(min).max(max),
+  );
+
+const optionalInt = (min: number, max: number) => queryInt(min, max).optional();
 
 export const CitizenListQuerySchema = z.strictObject({
   search: z.string().trim().max(80).optional(),
@@ -109,16 +125,16 @@ export const CitizenListQuerySchema = z.strictObject({
   householdId: optionalInt(1, 10_000_000),
   sort: z.enum(['id', 'name', 'balance', 'energy', 'age']).default('id'),
   order: z.enum(['asc', 'desc']).default('asc'),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  limit: queryInt(1, 200).default(50),
+  offset: queryInt(0, 1_000_000).default(0),
 });
 export type CitizenListQuery = z.input<typeof CitizenListQuerySchema>;
 
 export const BuildingListQuerySchema = z.strictObject({
   kind: z.enum(BUILDING_KINDS).optional(),
   search: z.string().trim().max(80).optional(),
-  limit: z.coerce.number().int().min(1).max(500).default(100),
-  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  limit: queryInt(1, 500).default(100),
+  offset: queryInt(0, 1_000_000).default(0),
 });
 
 const csv = z
@@ -136,7 +152,7 @@ export const EventQuerySchema = z.strictObject({
   before: optionalInt(1, Number.MAX_SAFE_INTEGER),
   /** Keyset cursor: return events with seq > after (oldest first). */
   after: optionalInt(0, Number.MAX_SAFE_INTEGER),
-  limit: z.coerce.number().int().min(1).max(500).default(100),
+  limit: queryInt(1, 500).default(100),
   types: csv.optional(),
   citizenId: optionalInt(1, 10_000_000),
   buildingId: optionalInt(1, 10_000_000),
@@ -150,7 +166,7 @@ export const MetricsQuerySchema = z.strictObject({
   keys: csv.optional(),
   fromTick: optionalInt(0, 2_000_000_000),
   toTick: optionalInt(0, 2_000_000_000),
-  maxPoints: z.coerce.number().int().min(10).max(5000).default(600),
+  maxPoints: queryInt(10, 5000).default(600),
 });
 export type MetricsQuery = z.input<typeof MetricsQuerySchema>;
 
@@ -320,7 +336,7 @@ export interface ListResponse<T> {
 export const AuditQuerySchema = z.strictObject({
   /** Keyset cursor: return entries with id < before (newest first). */
   before: optionalInt(1, Number.MAX_SAFE_INTEGER),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+  limit: queryInt(1, 200).default(50),
 });
 export type AuditQuery = z.input<typeof AuditQuerySchema>;
 

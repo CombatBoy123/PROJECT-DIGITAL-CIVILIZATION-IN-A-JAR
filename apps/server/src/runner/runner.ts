@@ -2,20 +2,27 @@ import { performance } from 'node:perf_hooks';
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import {
   InvariantViolationError,
-  Simulation,
   type Calendar,
   type InvariantMode,
   type MetricSample,
   type SimEvent,
+  type Simulation,
   type StepResult,
 } from '@civ/sim-core';
 import type { CivilizationStatus } from '@civ/shared';
 import type { Prisma } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
 import { AppError } from '../http/errors.js';
+import { reportFailure } from '../http/failure.js';
 import { captureState, type EncodedState } from '../persistence/codec.js';
 import { ProjectionTracker } from '../persistence/projections.js';
-import type { CivilizationStore } from '../persistence/store.js';
+import type { AuditInput, CivilizationStore, HaltInput } from '../persistence/store.js';
+import {
+  resetReplacement,
+  restoreReplacement,
+  rewindWrite,
+  type WorldReplacement,
+} from './replacement.js';
 import { SerialQueue } from './serial-queue.js';
 
 export interface RunnerSettings {
@@ -33,7 +40,6 @@ export type RunnerStore = Pick<
   CivilizationStore,
   | 'writeCheckpoint'
   | 'updateRuntime'
-  | 'audit'
   | 'recordHalt'
   | 'loadCheckpoint'
   | 'createSnapshot'
@@ -78,11 +84,7 @@ export interface RunnerInit {
 }
 
 /** Why the engine stopped: invariant violations, or an unexpected engine exception. */
-interface HaltRecord {
-  reason: string;
-  tick: number;
-  details: Prisma.InputJsonObject;
-}
+type HaltRecord = HaltInput;
 
 function haltRecord(err: unknown, tick: number): HaltRecord {
   if (err instanceof InvariantViolationError) {
@@ -116,7 +118,15 @@ export class SimulationRunner {
   private speed: number;
   private durableTick: number;
   private haltReason: string | null;
+  /** Client-safe description of the last persistence failure (details are in the log). */
   private lastError: string | null = null;
+  /**
+   * The status the database holds. It differs from `status` between an in-memory
+   * transition and the write that persists it (or after that write failed); the
+   * runner is not evictable until they agree, so a reload never resurrects a stale
+   * status (e.g. RUNNING after a pause).
+   */
+  private storedStatus: CivilizationStatus;
 
   private pendingEvents: SimEvent[] = [];
   private pendingMetrics: MetricSample[] = [];
@@ -143,6 +153,7 @@ export class SimulationRunner {
     this.id = init.id;
     this.simulation = init.simulation;
     this.status = init.status;
+    this.storedStatus = init.status;
     this.speed = init.speed;
     this.haltReason = init.haltReason;
     this.durableTick = init.simulation.tick;
@@ -169,6 +180,7 @@ export class SimulationRunner {
   get idle(): boolean {
     return (
       this.status !== 'running' &&
+      this.storedStatus === this.status &&
       !this.flushing &&
       !this.unrecordedHalt &&
       this.pendingEvents.length === 0 &&
@@ -214,20 +226,23 @@ export class SimulationRunner {
 
   // ---------------------------------------------------------------- control
 
+  /**
+   * Persist RUNNING (with its audit entry, in one transaction), then start the loop.
+   * If the write fails nothing changes, in memory or in the database.
+   */
   start(actor: string): Promise<RunnerSummary> {
     return this.queue.run(async () => {
       this.assertUsable();
       if (this.status === 'running') return this.summary();
-      await this.store.updateRuntime(this.id, { status: 'running' });
+      await this.settle();
+      await this.store.updateRuntime(
+        this.id,
+        { status: 'running' },
+        this.auditEntry('simulation.started', actor, { speed: this.speed }),
+      );
       this.status = 'running';
+      this.storedStatus = 'running';
       this.lastError = null;
-      await this.store.audit({
-        civilizationId: this.id,
-        action: 'simulation.started',
-        actor,
-        tick: this.simulation.tick,
-        details: { speed: this.speed },
-      });
       this.startLoop();
       this.notify({ type: 'status' });
       return this.summary();
@@ -235,29 +250,28 @@ export class SimulationRunner {
   }
 
   /**
-   * Stop the loop and make the current state durable. Also used to retry
-   * persistence after a failed checkpoint: pausing a paused runner that still has
-   * uncommitted ticks writes them.
+   * Stop the loop and make the current state and the paused status durable: with a
+   * checkpoint when ticks are uncommitted, otherwise with a status write. The
+   * `simulation.paused` audit entry commits with whichever write moves the stored
+   * status away from RUNNING. Also used to retry persistence after a failure: pausing
+   * a paused runner that still has uncommitted ticks (or a stale stored status)
+   * writes them.
    */
   pause(actor: string): Promise<RunnerSummary> {
     return this.queue.run(async () => {
       this.assertNotDisposed();
-      const wasRunning = this.status === 'running';
-      if (wasRunning) {
+      if (this.status === 'running') {
         this.status = 'paused';
         this.stopLoop();
         this.notify({ type: 'status' });
       }
-      if (this.status === 'paused' && this.hasUncommitted()) await this.checkpoint();
-      if (wasRunning) {
-        await this.store.audit({
-          civilizationId: this.id,
-          action: 'simulation.paused',
-          actor,
-          tick: this.simulation.tick,
-          details: {},
-        });
-      }
+      if (this.status !== 'paused') return this.summary();
+      // An interval checkpoint still in flight writes RUNNING; let it land first.
+      await this.settle();
+      const audit =
+        this.storedStatus === 'running' ? this.auditEntry('simulation.paused', actor, {}) : null;
+      if (this.hasUncommitted()) await this.checkpoint(audit);
+      else if (this.storedStatus !== this.status) await this.persistStatus(audit);
       return this.summary();
     });
   }
@@ -280,14 +294,13 @@ export class SimulationRunner {
         await this.recordHalt();
         return this.summary();
       }
-      await this.checkpoint();
-      await this.store.audit({
-        civilizationId: this.id,
-        action: 'simulation.stepped',
-        actor,
-        tick: this.simulation.tick,
-        details: { requested: count, fromTick, toTick: this.simulation.tick },
-      });
+      await this.checkpoint(
+        this.auditEntry('simulation.stepped', actor, {
+          requested: count,
+          fromTick,
+          toTick: this.simulation.tick,
+        }),
+      );
       return this.summary();
     });
   }
@@ -295,16 +308,13 @@ export class SimulationRunner {
   setSpeed(ticksPerSecond: number, actor: string): Promise<RunnerSummary> {
     return this.queue.run(async () => {
       this.assertNotDisposed();
-      await this.store.updateRuntime(this.id, { speed: ticksPerSecond });
+      await this.store.updateRuntime(
+        this.id,
+        { speed: ticksPerSecond },
+        this.auditEntry('simulation.speed_changed', actor, { ticksPerSecond }),
+      );
       this.speed = ticksPerSecond;
       this.tickDebt = 0;
-      await this.store.audit({
-        civilizationId: this.id,
-        action: 'simulation.speed_changed',
-        actor,
-        tick: this.simulation.tick,
-        details: { ticksPerSecond },
-      });
       this.notify({ type: 'status' });
       return this.summary();
     });
@@ -323,20 +333,15 @@ export class SimulationRunner {
   restoreSnapshot(snapshotId: string, actor: string): Promise<RunnerSummary> {
     return this.queue.run(async () => {
       this.assertNotDisposed();
-      const { simulation, name, tick } = await this.store.loadSnapshot(this.id, snapshotId, {
-        invariants: this.settings.invariants,
-      });
-      const fromTick = this.simulation.tick;
-      await this.replaceWorld(simulation, {
-        events: [],
-        metrics: [],
-        truncate: { fromSeq: simulation.state.nextEventSeq, fromTick: tick + 1 },
-        audit: {
-          action: 'snapshot.restored',
-          actor,
-          details: { snapshotId, name, fromTick, toTick: tick, stateHash: simulation.hash() },
-        },
-      });
+      const replacement = await restoreReplacement(
+        this.store,
+        this.id,
+        snapshotId,
+        this.settings.invariants,
+        actor,
+        { fromTick: this.simulation.tick },
+      );
+      await this.replaceWorld(replacement);
       return this.summary();
     });
   }
@@ -346,37 +351,34 @@ export class SimulationRunner {
     return this.queue.run(async () => {
       this.assertNotDisposed();
       const { seed, config } = this.simulation.state;
-      const { simulation, genesis } = Simulation.create(seed, config, {
-        invariants: this.settings.invariants,
-      });
-      const fromTick = this.simulation.tick;
-      await this.replaceWorld(simulation, {
-        events: genesis.events,
-        metrics: genesis.metrics ? [genesis.metrics] : [],
-        truncate: { fromSeq: 1, fromTick: 0 },
-        audit: {
-          action: 'simulation.reset',
-          actor,
-          details: { fromTick, stateHash: simulation.hash() },
-        },
-      });
+      await this.replaceWorld(
+        resetReplacement(seed, config, this.settings.invariants, actor, {
+          fromTick: this.simulation.tick,
+        }),
+      );
       return this.summary();
     });
   }
 
-  /** Persist everything and stop the loop (server shutdown). The stored status is kept. */
+  /**
+   * Persist everything and stop the loop (server shutdown, idle eviction). A running
+   * civilization stays RUNNING in the database (restart recovery resumes or pauses
+   * it); a paused one whose PAUSED status was not stored yet gets it written.
+   */
   shutdown(): Promise<void> {
     return this.queue.run(async () => {
       if (this.disposed) return;
       this.stopLoop();
       if (this.unrecordedHalt) {
         await this.recordHalt();
-      } else if (this.status !== 'halted' && this.hasUncommitted()) {
-        await this.checkpoint().catch((err: unknown) =>
-          this.log.error({ err }, 'Final checkpoint failed'),
-        );
+      } else if (this.status !== 'halted') {
+        await this.settle();
+        // Failures are logged by checkpoint() / persistStatus(); nothing more can be done.
+        if (this.hasUncommitted()) await this.checkpoint().catch(() => undefined);
+        else if (this.storedStatus !== this.status)
+          await this.persistStatus(null).catch(() => undefined);
       }
-      while (this.flushing) await this.flushing.catch(() => undefined);
+      await this.settle();
       this.disposed = true;
       this.listeners.clear();
     });
@@ -391,7 +393,7 @@ export class SimulationRunner {
       this.assertNotDisposed();
       const wasLooping = this.looping;
       this.stopLoop();
-      while (this.flushing) await this.flushing.catch(() => undefined);
+      await this.settle();
       try {
         await this.store.deleteCivilization(this.id, actor, details);
       } catch (err) {
@@ -420,6 +422,28 @@ export class SimulationRunner {
         `Simulation halted: ${this.haltReason ?? 'invariant violation'}. Restore a snapshot or reset.`,
       );
     }
+  }
+
+  private auditEntry(action: string, actor: string, details: Prisma.InputJsonValue): AuditInput {
+    return { civilizationId: this.id, action, actor, tick: this.simulation.tick, details };
+  }
+
+  /** Wait until no checkpoint write is in flight. */
+  private async settle(): Promise<void> {
+    while (this.flushing) await this.flushing.catch(() => undefined);
+  }
+
+  /** Store the in-memory status (paused, after a pause) without a checkpoint. */
+  private async persistStatus(audit: AuditInput | null): Promise<void> {
+    const status = this.status;
+    try {
+      await this.store.updateRuntime(this.id, { status }, audit);
+    } catch (err) {
+      this.lastError = reportFailure(this.log, err, 'Saving the status failed');
+      this.notify({ type: 'status' });
+      throw new AppError('INTERNAL', this.lastError);
+    }
+    this.storedStatus = status;
   }
 
   private hasUncommitted(): boolean {
@@ -454,10 +478,11 @@ export class SimulationRunner {
       this.timer = null;
       this.slice().catch((err: unknown) => {
         // Defensive: slice() handles its own failures; never let one crash the process.
-        this.log.error({ err }, 'Runner loop failed');
+        // The stored status stays RUNNING until a pause persists PAUSED (the runner is
+        // not evictable meanwhile).
         this.stopLoop();
         this.status = this.status === 'running' ? 'paused' : this.status;
-        this.lastError = `Runner loop failed: ${message(err)}`;
+        this.lastError = reportFailure(this.log, err, 'Runner loop failed');
         this.notify({ type: 'status' });
       });
     }, delayMs);
@@ -549,10 +574,17 @@ export class SimulationRunner {
   private async recordHalt(): Promise<void> {
     const record = this.unrecordedHalt;
     if (!record || this.disposed) return;
+    await this.settle();
     try {
-      while (this.flushing) await this.flushing.catch(() => undefined);
       await this.store.recordHalt({ civilizationId: this.id, ...record });
-      this.unrecordedHalt = null;
+    } catch (err) {
+      this.lastError = reportFailure(this.log, err, 'Recording the halt failed');
+      this.notify({ type: 'status' });
+      return;
+    }
+    this.unrecordedHalt = null;
+    this.storedStatus = 'halted';
+    try {
       const { simulation } = await this.store.loadCheckpoint(this.id, {
         invariants: this.settings.invariants,
       });
@@ -560,19 +592,20 @@ export class SimulationRunner {
       this.durableTick = simulation.tick;
       this.projection.prime(simulation.state);
       this.notify({ type: 'reset', tick: simulation.tick });
-    } catch (persistErr) {
-      this.lastError = `Failed to record halt: ${message(persistErr)}`;
-      this.log.error({ err: persistErr }, 'Failed to record halt');
+    } catch (err) {
+      this.lastError = reportFailure(this.log, err, 'Reloading the last checkpoint failed');
       this.notify({ type: 'status' });
     }
   }
 
   /**
-   * Write the current state as a checkpoint (waiting for any in-flight write first).
-   * Resolves with the state that became durable.
+   * Write the current state as a checkpoint (waiting for any in-flight write first),
+   * together with the current status and, optionally, the audit entry of the control
+   * action it completes. Resolves with the state that became durable.
    */
-  private async checkpoint(): Promise<EncodedState> {
-    while (this.flushing) await this.flushing.catch(() => undefined);
+  private async checkpoint(audit: AuditInput | null = null): Promise<EncodedState> {
+    await this.settle();
+    const status = this.status;
     const encoded = captureState(this.simulation.state);
     const events = this.pendingEvents;
     const metrics = this.pendingMetrics;
@@ -585,13 +618,15 @@ export class SimulationRunner {
       events,
       metrics,
       projection,
-      status: this.status,
+      status,
+      audit,
     });
     this.flushing = write;
     this.lastFlushAt = performance.now();
     try {
       await write;
       this.durableTick = encoded.tick;
+      this.storedStatus = status;
       this.lastError = null;
       this.notify({ type: 'checkpoint', tick: encoded.tick });
       return encoded;
@@ -601,8 +636,7 @@ export class SimulationRunner {
       this.pendingEvents = events.concat(this.pendingEvents);
       this.pendingMetrics = metrics.concat(this.pendingMetrics);
       this.projection.invalidate();
-      this.lastError = `Checkpoint failed: ${message(err)}`;
-      this.log.error({ err }, 'Checkpoint failed');
+      this.lastError = reportFailure(this.log, err, 'Checkpoint failed');
       if (this.status === 'running') {
         this.status = 'paused';
         this.stopLoop();
@@ -614,30 +648,15 @@ export class SimulationRunner {
     }
   }
 
-  private async replaceWorld(
-    next: Simulation,
-    change: {
-      events: readonly SimEvent[];
-      metrics: readonly MetricSample[];
-      truncate: { fromSeq: number; fromTick: number };
-      audit: { action: string; actor: string; details: Prisma.InputJsonValue };
-    },
-  ): Promise<void> {
+  private async replaceWorld(replacement: WorldReplacement): Promise<void> {
+    const next = replacement.simulation;
     const wasLooping = this.looping;
     this.stopLoop();
-    while (this.flushing) await this.flushing.catch(() => undefined);
-    const encoded = captureState(next.state);
-    const projection = new ProjectionTracker().delta(next.state, true);
+    await this.settle();
+    // A halt of the world being replaced (e.g. while a restore read its snapshot) is
+    // recorded with the rewind; the queued recordHalt() then finds nothing to do.
     try {
-      await this.store.rewind({
-        civilizationId: this.id,
-        encoded,
-        projection,
-        events: change.events,
-        metrics: change.metrics,
-        truncate: change.truncate,
-        audit: change.audit,
-      });
+      await this.store.rewind(rewindWrite(this.id, replacement, this.unrecordedHalt));
     } catch (err) {
       // Nothing changed in the database; carry on with the current world.
       if (wasLooping && this.status === 'running') this.startLoop();
@@ -650,6 +669,7 @@ export class SimulationRunner {
     this.projection.prime(next.state);
     this.durableTick = next.tick;
     this.status = 'paused';
+    this.storedStatus = 'paused';
     this.haltReason = null;
     this.lastError = null;
     this.notify({ type: 'reset', tick: next.tick });

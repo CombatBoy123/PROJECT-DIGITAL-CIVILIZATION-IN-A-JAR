@@ -138,6 +138,52 @@ describe('current world', () => {
     expect(second.items[0]!.id).toBeGreaterThan(first.items[6]!.id);
   });
 
+  it('name searches match LIKE wildcards literally', async () => {
+    // Names never contain % or _, so these must match nothing (not everything).
+    for (const term of ['%', '_', '__', '%25%', '\\', 'a_', '%a']) {
+      const q = encodeURIComponent(term);
+      const citizens = await get<Page<CitizenListItem>>(`${base}/citizens?search=${q}`);
+      expect(citizens.total, `citizens ${term}`).toBe(0);
+      const buildings = await get<Page<BuildingListItem>>(`${base}/buildings?search=${q}`);
+      expect(buildings.total, `buildings ${term}`).toBe(0);
+    }
+    const target = reference.state.citizens[3]!;
+    const prefix = target.lastName.slice(0, 2).toLowerCase();
+    const byPrefix = await get<Page<CitizenListItem>>(`${base}/citizens?search=${prefix}`);
+    expect(byPrefix.total).toBe(
+      reference.state.citizens.filter(
+        (c) =>
+          c.firstName.toLowerCase().includes(prefix) || c.lastName.toLowerCase().includes(prefix),
+      ).length,
+    );
+  });
+
+  it('rejects blank or malformed numeric query parameters instead of reading them as 0', async () => {
+    for (const url of [
+      `${base}/metrics?toTick=`,
+      `${base}/metrics?toTick=%20%20`,
+      `${base}/metrics?fromTick=&toTick=5`,
+      `${base}/metrics?maxPoints=`,
+      `${base}/events?toTick=&limit=500`,
+      `${base}/events?before=`,
+      `${base}/events?limit=1.5`,
+      `${base}/events?fromTick=0x10`,
+      `${base}/citizens?offset=`,
+      `${base}/citizens?householdId=-1`,
+      `${base}/audit?limit=`,
+      `${base}/export/metrics.csv?toTick=`,
+    ]) {
+      const res = await app.inject({ url });
+      expect(res.statusCode, url).toBe(400);
+      expect(res.json<{ error: { code: string } }>().error.code, url).toBe('VALIDATION_ERROR');
+    }
+    // Surrounding whitespace around digits is tolerated.
+    const padded = await get<MetricSeriesResponse>(
+      `${base}/metrics?keys=population.total&toTick=%205%20`,
+    );
+    expect(padded.toTick).toBe(5);
+  });
+
   it('citizen detail includes skills, places and household members', async () => {
     const c = reference.state.citizens[0]!;
     const detail = await get<CitizenDetail>(`${base}/citizens/${c.id}`);

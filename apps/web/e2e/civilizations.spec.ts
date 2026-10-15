@@ -57,4 +57,33 @@ test.describe('civilizations', () => {
       await deleteCivilization(request, created);
     }
   });
+
+  test('a failed submission focuses the first invalid field and links its error', async ({
+    page,
+  }) => {
+    await page.goto('/');
+    await page.getByTestId('field-name').fill(uniqueName('E2E Invalid'));
+    await page.getByTestId('field-seed').fill('bad seed!');
+    await page.getByTestId('field-population').fill('9');
+    await page.getByTestId('create-submit').click();
+
+    const seed = page.getByTestId('field-seed');
+    await expect(seed).toBeFocused();
+    await expect(seed).toHaveAttribute('aria-invalid', 'true');
+    const seedError = page.locator('.field-error').first();
+    await expect(seed).toHaveAccessibleDescription(
+      new RegExp(((await seedError.textContent()) ?? '').slice(0, 20)),
+    );
+    await expect(page.getByTestId('field-population')).toHaveAttribute('aria-invalid', 'true');
+
+    // An error inside the collapsed advanced section opens it and gets focus.
+    await seed.fill('');
+    await page.getByTestId('field-population').fill('24');
+    await page.getByText('Advanced parameters').click();
+    await page.getByTestId('field-daysPerSeason').fill('0');
+    await page.getByText('Advanced parameters').click();
+    await expect(page.getByTestId('field-daysPerSeason')).toBeHidden();
+    await page.getByTestId('create-submit').click();
+    await expect(page.getByTestId('field-daysPerSeason')).toBeFocused();
+  });
 });

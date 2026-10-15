@@ -1,8 +1,9 @@
-import { useId, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError, fieldIssues } from '../../api/client';
 import { useCreateCivilization } from '../../api/queries';
-import { ErrorMessage } from '../../components/Feedback';
+import { useAccess } from '../../api/useAccess';
+import { AccessNote, ErrorMessage } from '../../components/Feedback';
 import { useToast } from '../../components/Toasts';
 import {
   FIELD_BOUNDS,
@@ -20,8 +21,25 @@ import { formatCents } from '../../lib/format';
 /*
  * Genesis form: name, optional seed, population and every SimulationConfig parameter
  * (behind an "Advanced parameters" disclosure). Validated with the shared schema
- * before sending; server validation errors are mapped back onto the fields.
+ * before sending; server validation errors are mapped back onto the fields. Each
+ * error is linked to its field (aria-describedby), and after a failed submission
+ * focus moves to the first invalid field (opening the disclosure if needed) so
+ * keyboard and screen-reader users learn what to fix. Creating needs operator rights
+ * (see useAccess); without them the submit button is disabled and says why.
  */
+
+/**
+ * Reveal every invalid control (open collapsed disclosures that contain one) and focus
+ * the first, or the form-level error when no field is marked invalid.
+ */
+function focusFirstError(form: HTMLFormElement): void {
+  const invalid = [...form.querySelectorAll<HTMLElement>('[aria-invalid="true"]')];
+  for (const field of invalid) {
+    const details = field.closest('details');
+    if (details && !details.open) details.open = true;
+  }
+  (invalid[0] ?? form.querySelector<HTMLElement>('[data-form-error]'))?.focus();
+}
 
 function NumberField({
   path,
@@ -86,22 +104,37 @@ function NumberField({
 export function CreateCivilizationForm() {
   const [values, setValues] = useState<CreateFormValues>(initialFormValues);
   const [errors, setErrors] = useState<FieldErrors>({});
+  /** Incremented when a submission fails validation; focus follows the new errors. */
+  const [failedSubmits, setFailedSubmits] = useState(0);
+  const formRef = useRef<HTMLFormElement>(null);
   const create = useCreateCivilization();
+  const access = useAccess();
+  const accessNoteId = useId();
   const navigate = useNavigate();
   const toast = useToast();
   const nameId = useId();
   const seedId = useId();
   const weatherId = useId();
 
+  useEffect(() => {
+    if (failedSubmits > 0 && formRef.current) focusFirstError(formRef.current);
+  }, [failedSubmits]);
+
   const setNumber = (path: NumericFieldPath, v: string) =>
     setValues((s) => ({ ...s, numbers: { ...s.numbers, [path]: v } }));
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    if (!access.canOperate) return;
+    // Each submission reports one outcome: forget the previous attempt's server error.
+    create.reset();
     const request = toRequest(values);
     const clientErrors = validateRequest(request);
     setErrors(clientErrors);
-    if (Object.keys(clientErrors).length > 0) return;
+    if (Object.keys(clientErrors).length > 0) {
+      setFailedSubmits((n) => n + 1);
+      return;
+    }
     create.mutate(request, {
       onSuccess: (detail) => {
         toast.success('Civilization created', `"${detail.name}" with seed ${detail.seed}.`);
@@ -114,8 +147,10 @@ export function CreateCivilizationForm() {
           for (const issue of issues)
             next[normalizeIssuePath(issue.path) || 'form'] ??= issue.message;
           setErrors(next);
+          setFailedSubmits((n) => n + 1);
         } else if (error instanceof ApiError && error.code === 'CONFLICT') {
           setErrors({ name: error.message });
+          setFailedSubmits((n) => n + 1);
         }
       },
     });
@@ -127,7 +162,13 @@ export function CreateCivilizationForm() {
   const configLevelError = errors['config'] ?? errors['form'];
 
   return (
-    <form className="panel create-form" onSubmit={submit} noValidate aria-labelledby="create-title">
+    <form
+      ref={formRef}
+      className="panel create-form"
+      onSubmit={submit}
+      noValidate
+      aria-labelledby="create-title"
+    >
       <div className="panel-header">
         <h2 id="create-title" className="panel-title">
           New civilization
@@ -169,7 +210,7 @@ export function CreateCivilizationForm() {
             className="mono"
             value={values.seed}
             aria-invalid={errors.seed ? true : undefined}
-            aria-describedby={`${seedId}-hint`}
+            aria-describedby={errors.seed ? `${seedId}-error ${seedId}-hint` : `${seedId}-hint`}
             data-testid="field-seed"
             onChange={(e) => setValues((s) => ({ ...s, seed: e.target.value }))}
           />
@@ -177,7 +218,11 @@ export function CreateCivilizationForm() {
             Leave empty and the server picks a random seed (recorded and shown afterwards). The same
             seed and parameters always produce the same world.
           </span>
-          {errors.seed && <span className="field-error">{errors.seed}</span>}
+          {errors.seed && (
+            <span id={`${seedId}-error`} className="field-error">
+              {errors.seed}
+            </span>
+          )}
         </div>
         <NumberField
           {...populationField}
@@ -218,15 +263,23 @@ export function CreateCivilizationForm() {
             </div>
           </div>
         </details>
-        {configLevelError && <div className="field-error">{configLevelError}</div>}
+        {configLevelError && (
+          <div className="field-error" role="alert" tabIndex={-1} data-form-error>
+            {configLevelError}
+          </div>
+        )}
         {create.isError && fieldIssues(create.error).length === 0 && (
           <ErrorMessage error={create.error} title="Could not create the civilization" />
+        )}
+        {!access.canOperate && access.reason && (
+          <AccessNote id={accessNoteId} reason={access.reason} />
         )}
         <div className="row gap-s">
           <button
             type="submit"
             className="btn btn-primary"
-            disabled={create.isPending}
+            disabled={create.isPending || !access.canOperate}
+            aria-describedby={access.canOperate ? undefined : accessNoteId}
             data-testid="create-submit"
           >
             {create.isPending ? 'Generating world…' : 'Create civilization'}

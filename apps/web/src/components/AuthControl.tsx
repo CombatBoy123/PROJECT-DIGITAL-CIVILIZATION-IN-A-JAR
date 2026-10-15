@@ -1,20 +1,24 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useState, type FormEvent } from 'react';
+import { forgetTokenVerdict } from '../api/access';
 import { useMeta } from '../api/queries';
 import { setToken } from '../api/token';
+import { useAccess } from '../api/useAccess';
 import { useToken } from '../api/useCivilizationStream';
 import { Modal } from './Modal';
 
 /*
  * Access-token entry for servers running with AUTH_MODE=token. The server tells us
  * (GET /api/meta) whether tokens are used at all; in disabled mode nothing is shown.
- * The token is never validated client-side — the server's 401/403 responses are
- * surfaced where the failing action happened.
+ * The token is never validated client-side: the button shows what the server's
+ * answers have revealed about it (operator, viewer, rejected or not yet confirmed;
+ * see access.ts), and saving a token again forgets that so it is re-learned.
  */
 
 export function AuthControl() {
   const meta = useMeta();
   const token = useToken();
+  const access = useAccess();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState('');
@@ -34,6 +38,7 @@ export function AuthControl() {
   if (!tokenMode) return null;
 
   const apply = (value: string | null) => {
+    forgetTokenVerdict();
     setToken(value);
     setOpen(false);
     void qc.invalidateQueries();
@@ -48,11 +53,17 @@ export function AuthControl() {
     <>
       <button
         type="button"
-        className={`btn btn-sm ${token ? 'btn-ghost' : 'btn-primary'}`}
+        className={`btn btn-sm ${token ? 'btn-ghost' : 'btn-primary'} ${access.state === 'invalid' ? 'text-danger' : ''}`}
         onClick={() => setOpen(true)}
+        title={
+          access.reason ??
+          (access.state === 'unverified'
+            ? 'The server has not yet shown whether this is the operator or the viewer token; the first control you use will tell.'
+            : undefined)
+        }
         data-testid="auth-button"
       >
-        {token ? 'Token set' : 'Enter access token'}
+        {token ? (access.label ?? 'Token set') : 'Enter access token'}
       </button>
       <Modal open={open} title="Access token" onClose={() => setOpen(false)}>
         <form className="dialog-body stack gap-m" onSubmit={submit}>
@@ -63,6 +74,7 @@ export function AuthControl() {
               : 'Reading is open; controls need the operator token.'}{' '}
             The token is stored in this browser only.
           </p>
+          {token && access.reason && <p className="small">{access.reason}</p>}
           <div className="field">
             <label className="field-label" htmlFor={inputId}>
               Token

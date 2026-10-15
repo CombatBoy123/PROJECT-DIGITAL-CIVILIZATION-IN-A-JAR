@@ -17,6 +17,25 @@ describe('hitTest', () => {
     expect(hitTest(citizens, buildings, 31, 30, options)).toEqual({ kind: 'citizen', id: 10 });
   });
 
+  it('inside a footprint, needs a direct hit on a dot; otherwise selects the building', () => {
+    // Radius 4 screen px = 2 world px at zoom 2; the 4 px tolerance is not applied inside.
+    expect(hitTest(citizens, buildings, 33, 30, options)).toEqual({ kind: 'building', id: 1 });
+    expect(hitTest(citizens, buildings, 32, 30, options)).toEqual({ kind: 'citizen', id: 10 });
+    // A crowded footprint at overview zoom: points between dots pick the building.
+    const crowd: CitizenPoint[] = [];
+    for (let i = 0; i < 6; i++)
+      for (let j = 0; j < 6; j++)
+        crowd.push({ id: 100 + i * 6 + j, x: 20 + i * 8, y: 20 + j * 8, visible: true });
+    const overview = { zoom: 0.5, citizenRadiusPx: 2, tolerancePx: 4 };
+    expect(hitTest(crowd, buildings, 24, 24, overview)).toEqual({ kind: 'building', id: 1 });
+    expect(hitTest(crowd, buildings, 20.5, 20, overview)).toEqual({ kind: 'citizen', id: 100 });
+  });
+
+  it('keeps the tolerance for citizens outside footprints (on roads)', () => {
+    const walker: CitizenPoint[] = [{ id: 20, x: 72, y: 40, visible: true }];
+    expect(hitTest(walker, buildings, 72, 43, options)).toEqual({ kind: 'citizen', id: 20 });
+  });
+
   it('picks the nearest citizen', () => {
     expect(hitTestCitizens(citizens, 34, 30, options)).toBe(11);
   });

@@ -2,6 +2,8 @@ import { SPEED_PRESETS, type CivilizationStatus } from '@civ/shared';
 import { TICKS_PER_DAY } from '@civ/sim-core';
 import { useCallback, useEffect, useId, useRef } from 'react';
 import { useControl, useSetSpeed } from '../../api/queries';
+import { useAccess } from '../../api/useAccess';
+import { AccessNote } from '../../components/Feedback';
 import { useToast } from '../../components/Toasts';
 import { shortcutFor } from '../../lib/keyboard';
 
@@ -9,6 +11,8 @@ import { shortcutFor } from '../../lib/keyboard';
  * Run controls: play/pause, single step, step one day, speed presets. Space and "."
  * are global shortcuts (ignored while typing). The server is authoritative: the
  * displayed status comes from the stream, not from the button that was pressed.
+ * Without operator rights (see useAccess) the controls are disabled, the shortcuts
+ * do nothing and the reason is shown in place of the shortcut hint.
  */
 
 export function speedLabel(ticksPerSecond: number): string {
@@ -27,26 +31,30 @@ export function PlaybackControls({
   const control = useControl(civilizationId);
   const setSpeed = useSetSpeed(civilizationId);
   const toast = useToast();
+  const access = useAccess();
   const speedId = useId();
+  const noteId = useId();
   const running = status === 'running';
   const halted = status === 'halted';
   const busy = control.isPending;
-  const disabled = status === null || halted || busy;
+  const canOperate = access.canOperate;
+  const disabled = status === null || halted || busy || !canOperate;
+  const describedBy = canOperate ? undefined : noteId;
 
   const togglePlay = useCallback(() => {
-    if (status === null || status === 'halted' || control.isPending) return;
+    if (!canOperate || status === null || status === 'halted' || control.isPending) return;
     control.mutate(
       { action: status === 'running' ? 'pause' : 'start' },
       { onError: (e) => toast.error(status === 'running' ? 'Pause failed' : 'Start failed', e) },
     );
-  }, [control, status, toast]);
+  }, [canOperate, control, status, toast]);
 
   const step = useCallback(
     (steps: number) => {
-      if (status !== 'paused' || control.isPending) return;
+      if (!canOperate || status !== 'paused' || control.isPending) return;
       control.mutate({ action: 'step', steps }, { onError: (e) => toast.error('Step failed', e) });
     },
-    [control, status, toast],
+    [canOperate, control, status, toast],
   );
 
   // Keep the latest handlers for the window listener without re-subscribing.
@@ -76,6 +84,7 @@ export function PlaybackControls({
         type="button"
         className={`btn ${running ? '' : 'btn-primary'} playback-main`}
         disabled={disabled}
+        aria-describedby={describedBy}
         aria-keyshortcuts="Space"
         data-testid="play-pause"
         onClick={togglePlay}
@@ -86,6 +95,7 @@ export function PlaybackControls({
         type="button"
         className="btn"
         disabled={disabled || running}
+        aria-describedby={describedBy}
         aria-keyshortcuts="."
         data-testid="step-1"
         title={running ? 'Pause to step' : 'Advance one tick (one hour)'}
@@ -97,6 +107,7 @@ export function PlaybackControls({
         type="button"
         className="btn"
         disabled={disabled || running}
+        aria-describedby={describedBy}
         data-testid="step-24"
         title={running ? 'Pause to step' : 'Advance one day (24 ticks)'}
         onClick={() => step(TICKS_PER_DAY)}
@@ -110,7 +121,8 @@ export function PlaybackControls({
         <select
           id={speedId}
           value={speed ?? ''}
-          disabled={speed === null || setSpeed.isPending}
+          disabled={speed === null || setSpeed.isPending || !canOperate}
+          aria-describedby={describedBy}
           data-testid="speed-select"
           onChange={(e) =>
             setSpeed.mutate(Number(e.target.value), {
@@ -126,9 +138,13 @@ export function PlaybackControls({
           ))}
         </select>
       </div>
-      <span className="muted small shortcut-hint">
-        <kbd>Space</kbd> play/pause · <kbd>.</kbd> step
-      </span>
+      {canOperate ? (
+        <span className="muted small shortcut-hint">
+          <kbd>Space</kbd> play/pause · <kbd>.</kbd> step
+        </span>
+      ) : (
+        <AccessNote id={noteId} reason={access.reason ?? 'Operator token required.'} />
+      )}
     </div>
   );
 }

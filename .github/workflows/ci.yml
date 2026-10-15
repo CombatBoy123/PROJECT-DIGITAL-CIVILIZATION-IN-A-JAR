@@ -61,10 +61,12 @@ jobs:
 
       # db:migrate reads ../../.env only for variables that are not already set,
       # so DATABASE_URL from the environment selects the target database.
+      # (The server tests also migrate civ_test themselves; `pnpm test:e2e` runs
+      # db:migrate:e2e, which uses E2E_DATABASE_URL, before Playwright.)
       - name: Migrate test and e2e databases
         run: |
           DATABASE_URL="$TEST_DATABASE_URL" pnpm db:migrate
-          DATABASE_URL="$E2E_DATABASE_URL" pnpm db:migrate
+          pnpm db:migrate:e2e
 
       - name: Format check
         run: pnpm format:check

@@ -14,31 +14,33 @@ stops the server with a list of problems. `.env.example` contains the developmen
 defaults (`pnpm dev` and `pnpm db:migrate` read `.env`; variables already present in the
 environment take precedence).
 
-| Variable                  | Values                                                       | Default                 | Meaning                                                                                                     |
-| ------------------------- | ------------------------------------------------------------ | ----------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`            | PostgreSQL URL                                               | **required**            | the application database                                                                                    |
-| `HOST`                    | address                                                      | `127.0.0.1`             | listen address; `0.0.0.0` to accept remote connections (requires token auth)                                |
-| `PORT`                    | 0–65535                                                      | `3001`                  | listen port                                                                                                 |
-| `CORS_ORIGINS`            | comma-separated origins                                      | `http://localhost:5173` | browser origins allowed to call the API cross-origin (not needed when the server serves the web app itself) |
-| `AUTH_MODE`               | `disabled`, `token`                                          | `disabled`              | see [authentication](#authentication)                                                                       |
-| `OPERATOR_TOKEN`          | ≥ 24 characters                                              | —                       | bearer token for reads and mutations; required when `AUTH_MODE=token`                                       |
-| `VIEWER_TOKEN`            | ≥ 24 characters, different from `OPERATOR_TOKEN`             | —                       | optional read-only token; when set, reads require a token                                                   |
-| `CHECKPOINT_INTERVAL_MS`  | 100–600,000                                                  | `2000`                  | maximum real time between checkpoints of a running civilization (bounds what a crash can lose)              |
-| `MAX_BUFFERED_EVENTS`     | 100–1,000,000                                                | `20000`                 | uncommitted events that force a checkpoint before more ticks run (backpressure)                             |
-| `FRAME_RATE`              | 1–30                                                         | `5`                     | maximum WebSocket frames per second per civilization                                                        |
-| `INVARIANT_CHECKS`        | `every-tick`, `off`                                          | `every-tick`            | `off` exists for benchmarks only; never use it for experiments whose results matter                         |
-| `RESUME_RUNNING_ON_START` | `true`, `false`, `1`, `0`                                    | `false`                 | continue civilizations that were running when the server stopped (otherwise they are paused)                |
-| `LOG_LEVEL`               | `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent` | `info`                  | JSON logs on stdout (pino); `Authorization` headers and stream `?token=` values are redacted                |
-| `WEB_DIST_DIR`            | directory                                                    | —                       | serve the built web app from this directory (single-origin deployment, SPA fallback)                        |
-| `NODE_ENV`                | `development`, `test`, `production`                          | `development`           | set to `production` in the image                                                                            |
-| `TEST_DATABASE_URL`       | PostgreSQL URL                                               | `…/civ_test`            | **tests only**: the integration-test database (its tables are truncated)                                    |
+| Variable                             | Values                                                       | Default                 | Meaning                                                                                                                                                                     |
+| ------------------------------------ | ------------------------------------------------------------ | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                       | PostgreSQL URL                                               | **required**            | the application database                                                                                                                                                    |
+| `HOST`                               | address                                                      | `127.0.0.1`             | listen address; `0.0.0.0` to accept remote connections (requires token auth)                                                                                                |
+| `PORT`                               | 0–65535                                                      | `3001`                  | listen port                                                                                                                                                                 |
+| `CORS_ORIGINS`                       | comma-separated origins                                      | `http://localhost:5173` | browser origins allowed to call the API cross-origin (not needed when the server serves the web app itself)                                                                 |
+| `AUTH_MODE`                          | `disabled`, `token`                                          | `disabled`              | see [authentication](#authentication)                                                                                                                                       |
+| `OPERATOR_TOKEN`                     | ≥ 24 characters                                              | —                       | bearer token for reads and mutations; required when `AUTH_MODE=token`. Generate it (`openssl rand -hex 32`): the server checks only the length, not the randomness          |
+| `VIEWER_TOKEN`                       | ≥ 24 characters, different from `OPERATOR_TOKEN`             | —                       | optional read-only token; when set, reads require a token                                                                                                                   |
+| `CHECKPOINT_INTERVAL_MS`             | 100–600,000                                                  | `2000`                  | maximum real time between checkpoints of a running civilization (bounds what a crash can lose)                                                                              |
+| `MAX_BUFFERED_EVENTS`                | 100–1,000,000                                                | `20000`                 | uncommitted events that force a checkpoint before more ticks run (backpressure)                                                                                             |
+| `FRAME_RATE`                         | 1–30                                                         | `5`                     | maximum WebSocket frames per second per civilization                                                                                                                        |
+| `STREAM_MAX_CONNECTIONS`             | 1–100,000                                                    | `256`                   | live stream WebSockets accepted in total; more are refused with `503 UNAVAILABLE`                                                                                           |
+| `STREAM_MAX_CONNECTIONS_PER_ADDRESS` | 1–100,000                                                    | `32`                    | live stream WebSockets per client IP address (behind a reverse proxy: per proxy address)                                                                                    |
+| `INVARIANT_CHECKS`                   | `every-tick`, `off`                                          | `every-tick`            | `off` exists for benchmarks only: it skips every invariant check, including at genesis and when a stored state is loaded; never use it for experiments whose results matter |
+| `RESUME_RUNNING_ON_START`            | `true`, `false`, `1`, `0`                                    | `false`                 | continue civilizations that were running when the server stopped (otherwise they are paused)                                                                                |
+| `LOG_LEVEL`                          | `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent` | `info`                  | JSON logs on stdout (pino); `Authorization` headers and stream `?token=` values are redacted                                                                                |
+| `WEB_DIST_DIR`                       | directory                                                    | —                       | serve the built web app from this directory (single-origin deployment, SPA fallback)                                                                                        |
+| `NODE_ENV`                           | `development`, `test`, `production`                          | `development`           | set to `production` in the image                                                                                                                                            |
+| `TEST_DATABASE_URL`                  | PostgreSQL URL                                               | `…/civ_test`            | **tests only**: the integration-test database (its tables are truncated)                                                                                                    |
 
 ## Authentication
 
-| Mode       | Behaviour                                                                                                                                                                                                     |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `disabled` | No tokens; every request acts as the operator `local-dev`. Accepted **only** when `HOST` is `127.0.0.1`, `localhost` or `::1`.                                                                                |
-| `token`    | `Authorization: Bearer <token>` (WebSocket: `?token=`). `OPERATOR_TOKEN` may do everything; `VIEWER_TOKEN`, if set, may only read and is then required for reads; without `VIEWER_TOKEN` reads are anonymous. |
+| Mode       | Behaviour                                                                                                                                                                                                                                    |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `disabled` | No tokens; every request acts as the operator `local-dev`. Accepted **only** when `HOST` is `127.0.0.1`, `localhost` or `::1`, and only requests addressed to a loopback host are served (below).                                            |
+| `token`    | `Authorization: Bearer <token>` (stream WebSocket upgrades may use `?token=` instead). `OPERATOR_TOKEN` may do everything; `VIEWER_TOKEN`, if set, may only read and is then required for reads; without `VIEWER_TOKEN` reads are anonymous. |
 
 **Why `disabled` is loopback-only.** Without tokens, anyone who can reach the port can
 start, reset, restore or delete civilizations. Binding to a loopback address limits
@@ -48,17 +50,53 @@ trusting documentation: `HOST=0.0.0.0` with `AUTH_MODE=disabled` is a configurat
 error. The same applies inside a container, where the server must listen on
 `0.0.0.0` to be reachable — so the image can only run with token auth.
 
+Binding to loopback does not stop **DNS rebinding**: a web page open in the
+developer's browser can point its own host name at `127.0.0.1` and then send
+same-origin requests to the server. Such requests carry the attacker's host name, so in
+disabled mode the server also checks every request — reads, mutations, CORS preflights
+and WebSocket upgrades, even `/api/health`:
+
+- the `Host` header must name a loopback host: `localhost`, `*.localhost`,
+  `127.0.0.0/8` or `[::1]`, with any port (strict syntax, so `evil.com@127.0.0.1` or
+  `127.0.0.1.attacker.example` do not pass);
+- an `Origin` header, when present, must be a loopback `http(s)` origin or listed in
+  `CORS_ORIGINS`; the opaque origin `null` is rejected.
+
+Anything else gets `403 FORBIDDEN` (see [API.md](API.md#authentication) for the exact
+messages). The port is deliberately not pinned to `PORT`: a rebinding page can never
+present a loopback host name, and same-machine reverse proxies forward the original
+`Host`. Consequences: browsing the development UI through a LAN address or another host
+name needs token mode, and the Vite dev server forwards `/api` with `changeOrigin`, so
+it keeps working. The remaining trust assumption: **any process on the same machine
+can operate a server in disabled mode.**
+
 Further notes:
 
 - Generate tokens with `openssl rand -hex 32`. Keep them out of images, Compose files
   and version control; pass them as environment variables or secrets.
+- Access is decided per matched route from the `auth` column of `API_ROUTES`, so
+  encoded or absolute-form request targets cannot bypass it, and routes under `/api`
+  that are not in the table require the operator (see
+  [API.md](API.md#authentication)).
 - The server speaks plain HTTP. Tokens are bearer credentials, so put a TLS-terminating
   reverse proxy in front of any deployment that is reachable beyond localhost, and
-  configure it to proxy WebSocket upgrades for `/api/civilizations/:id/stream`. The
-  stream token travels in the query string; make sure the proxy does not log query
-  strings (the server redacts them from its own logs).
+  configure it to proxy WebSocket upgrades for `/api/civilizations/:id/stream`. Browsers
+  send the stream token in the query string (`?token=`, accepted only on those
+  upgrades); make sure the proxy does not log query strings (the server redacts them
+  from its own logs). Every other request must use the `Authorization` header; a query
+  token there is ignored.
+- Behind a reverse proxy, all clients share the proxy's address, so
+  `STREAM_MAX_CONNECTIONS_PER_ADDRESS` limits the proxy as a whole; raise it (up to
+  `STREAM_MAX_CONNECTIONS`) accordingly.
 - The web app keeps the token the user enters in the browser's `localStorage` (memory
-  only when storage is unavailable); use the viewer token for shared screens.
+  only when storage is unavailable); use the viewer token for shared screens. The
+  server has no endpoint that reports a token's role, so the UI learns it from the
+  server's answers (a `403` means a viewer token, a successful operator action the
+  operator token, a `401` a rejected token) and stores the verdict per token
+  fingerprint in `localStorage` (`civ.accessVerdict`). With a viewer, missing or
+  rejected token, operator-only controls are disabled with an explanation; a viewer
+  token sees them enabled until its first operator action is refused. Saving the token
+  again in the token dialog forgets the stored role.
 - Destructive actions additionally require the civilization's exact name (see
   [API.md](API.md#destructive-actions)). All control actions are audited with the actor.
 
@@ -123,7 +161,8 @@ its own copy of a civilization; see [limitations](#limitations)).
   `Dockerfile`, waits for `db` to be healthy, runs migrations then the server with the
   built web app, `AUTH_MODE=token`, `HOST=0.0.0.0`, published on `${APP_PORT:-3001}`.
   `OPERATOR_TOKEN` comes from your shell (the server refuses to start without one);
-  `VIEWER_TOKEN`, `RESUME_RUNNING_ON_START` and `LOG_LEVEL` are passed through when set.
+  `VIEWER_TOKEN`, `RESUME_RUNNING_ON_START`, `LOG_LEVEL`, `STREAM_MAX_CONNECTIONS` and
+  `STREAM_MAX_CONNECTIONS_PER_ADDRESS` are passed through when set.
   `stop_grace_period: 40s` leaves time for the final checkpoints (the server
   force-exits after 30 s).
 
@@ -175,9 +214,27 @@ Details are in [DATABASE.md](DATABASE.md#crash-and-restart-recovery). In short:
   resumed when `RESUME_RUNNING_ON_START=true`.
 - **Database unavailable**: `/api/health` returns `503`; a failed checkpoint pauses
   the civilization, keeps the uncommitted ticks in memory and reports `lastError`;
-  pausing again (or the next checkpoint) retries.
+  pausing again (or the next checkpoint) retries. A control action whose write fails
+  returns `500` and changes nothing (start does not start, the speed is unchanged).
+- **Finding the cause of an error**: `lastError` and `500` messages contain only a
+  classification and a reference, e.g. `Checkpoint failed (database unreachable; ref
+3f9c2a1b)`. The server log has the full error in an entry with the same `errorRef`
+  (`docker compose logs app | grep 3f9c2a1b`).
 - **Halts**: an invariant violation halts the civilization and keeps the last good
   checkpoint; restore a snapshot or reset it (see [API.md](API.md#halted-civilizations)).
+- **Unloadable stored state** (corrupt or non-gzip checkpoint blob, failed hash or
+  schema verification, invariant violation, missing checkpoint): the civilization shows
+  as halted with "Stored state could not be loaded: _reason_. Restore a snapshot or
+  reset." and a `simulation.state_unloadable` audit entry. To recover: (1) if the
+  history matters, back up the database first; (2) restore a snapshot from the
+  observatory's Snapshots tab or with `POST …/snapshots/:snapshotId/restore`, or
+  regenerate from the seed with `POST …/reset` (both with
+  `{ "confirm": "<exact name>" }`); neither reads the corrupt checkpoint. The audit
+  entry of the recovery records `recoveredFromUnloadableState: true`. A checkpoint of a
+  different state schema version is answered with `409 CONFLICT` and left untouched:
+  run a server of the matching version instead (see [upgrades](#upgrades)).
+- **Exports during a rewind**: a metrics or events export that is streaming when a
+  restore, reset or delete commits is aborted mid-transfer; download it again.
 
 ## Upgrades
 
@@ -193,7 +250,9 @@ different state schema version are refused rather than reinterpreted.
 - **One server process per database.** Civilizations are loaded into the memory of
   the process that serves them; there is no cross-process coordination in Phase 1, so
   do not run replicas against the same database.
-- **No built-in TLS, rate limiting or user accounts**: two shared tokens (operator,
-  viewer) are the whole access model.
+- **No built-in TLS, request rate limiting or user accounts**: two shared tokens
+  (operator, viewer) are the whole access model; only live stream connections are
+  capped.
+- **Disabled mode trusts the local machine**: any local process can operate it.
 - **No retention policy**: history grows with simulated time until a civilization is
   deleted (sizes in [DATABASE.md](DATABASE.md#size-and-retention)).

@@ -6,7 +6,11 @@ response types) and `src/stream.ts` (WebSocket messages). The server implementat
 in `apps/server/src/routes/` and `apps/server/src/ws/stream.ts`.
 
 All examples below are real responses from the production build of the server
-(seed `demo-1`, 100 citizens), shortened where marked with `…`.
+(`node apps/server/dist/index.js`, `AUTH_MODE=token` with both tokens set, seed
+`demo-1`, 100 citizens), recorded on 2026-10-15 with engine `0.1.0` as of commit
+`88d349b` and shortened where marked with `…`. Ids, timestamps and the ticks reached
+while running in real time differ from run to run; hashes, metrics, names and every
+other simulation value are reproducible.
 
 Related documents: [DATABASE.md](DATABASE.md) (where data comes from),
 [DEPLOYMENT.md](DEPLOYMENT.md) (auth configuration),
@@ -32,6 +36,11 @@ Related documents: [DATABASE.md](DATABASE.md) (where data comes from),
   CSV/NDJSON exports and the WebSocket. Request bodies are limited to 256 KiB.
 - Every request object is validated with Zod **strict** schemas: unknown body fields
   and unknown query parameters are rejected with `400 VALIDATION_ERROR`.
+- Integer query parameters (`limit`, `offset`, `before`, `after`, `fromTick`, `toTick`,
+  `citizenId`, `buildingId`, `householdId`, `maxPoints`) accept only decimal digits
+  (surrounding whitespace is ignored). An empty, blank or non-decimal value (`?toTick=`,
+  `1.5`, `0x10`, `-1`) is `400 VALIDATION_ERROR` ("Expected a non-negative integer"),
+  never read as 0; omit a parameter to use its default.
 - `:id` is a civilization UUID; `:citizenId` and `:buildingId` are positive integers
   (engine ids); `:snapshotId` is a UUID.
 - Status values are lower case: `paused`, `running`, `halted`.
@@ -47,27 +56,70 @@ JSON='content-type: application/json'
 
 ## Authentication
 
-Configured by environment variables (see [DEPLOYMENT.md](DEPLOYMENT.md#authentication)).
+Configured by environment variables (see [DEPLOYMENT.md](DEPLOYMENT.md#authentication));
+implemented in `apps/server/src/auth/auth.ts`.
 
-| Mode                 | Who can do what                                                                                                                                                                                         |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AUTH_MODE=disabled` | Every request acts as operator `local-dev`. Accepted **only** when `HOST` is a loopback address (`127.0.0.1`, `localhost`, `::1`); the server refuses to start otherwise.                               |
-| `AUTH_MODE=token`    | `Authorization: Bearer <token>`. The `OPERATOR_TOKEN` may read and mutate. If `VIEWER_TOKEN` is set, reads require the viewer or operator token; if it is not set, reads are open to anonymous clients. |
+| Mode                 | Who can do what                                                                                                                                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUTH_MODE=disabled` | Every request acts as operator `local-dev`. Accepted **only** when `HOST` is a loopback address (`127.0.0.1`, `localhost`, `::1`); the server refuses to start otherwise. Requests must also be addressed to a loopback host (below). |
+| `AUTH_MODE=token`    | `Authorization: Bearer <token>`. The `OPERATOR_TOKEN` may read and mutate. If `VIEWER_TOKEN` is set, reads require the viewer or operator token; if it is not set, reads are open to anonymous clients.                               |
 
-Each route has an auth level (`API_ROUTES[].auth`):
+Each route has an auth level, the `auth` column of `API_ROUTES`:
 
 - `public` — no token ever: `GET /api/health`, `GET /api/meta`.
 - `read` — every other `GET` (including the stream).
 - `operate` — every `POST`, `PUT` and `DELETE`.
 
+**Access is decided from the route the server matched, not from the URL text.**
+Percent-encoded paths (`/%61pi/civilizations/…` reaches `/api/civilizations/…`) and
+absolute-form request targets (`GET http://host/api/…`) therefore get exactly the
+`401`/`403` of the canonical path. `HEAD` uses the level of the `GET` route. A route under
+`/api` that is missing from `API_ROUTES` requires the operator (fail closed); unknown
+routes are `404 NOT_FOUND`.
+
 Resolution of a request in token mode: a wrong token → `401 UNAUTHORIZED` ("Invalid
-token"); no token while `VIEWER_TOKEN` is set → `401`; a mutation without a token →
-`401`; a mutation with the viewer token → `403 FORBIDDEN`. Tokens are compared in
-constant time. Browsers cannot set headers on WebSocket connections, so the stream
-endpoint also accepts `?token=<token>`; the value is redacted from logs. CORS allows the
-origins in `CORS_ORIGINS` with methods `GET, POST, PUT, DELETE`, headers
+token"); no token while `VIEWER_TOKEN` is set → `401` ("A token is required to read this
+server"); a mutation without a token → `401`; a mutation with the viewer token →
+`403 FORBIDDEN` ("Operator token required for this action"). Tokens are compared in
+constant time.
+
+**Tokens go in the `Authorization` header.** Browsers cannot set headers on WebSocket
+connections, so WebSocket upgrade requests of `GET /api/civilizations/:id/stream` (and
+only those) also accept `?token=<token>`; the value is redacted from logs. On every other
+request a `?token=` is ignored, so the request counts as unauthenticated:
+
+```sh
+curl -s "$API/api/civilizations?token=$OPERATOR_TOKEN"
+# → 401 { "error": { "code": "UNAUTHORIZED", "message": "A token is required to read this server" } }
+```
+
+**With `AUTH_MODE=disabled` only local requests are served.** Binding to loopback keeps
+other machines out, but a web page in your browser could rebind its own host name to
+`127.0.0.1` and call the server as a same-origin request (DNS rebinding). So every
+request — reads, mutations, CORS preflights and WebSocket upgrades, even
+`/api/health` — must carry a `Host` header naming a loopback host (`localhost`,
+`*.localhost`, `127.0.0.0/8` or `[::1]`, any port), and an `Origin` header, when present,
+must be a loopback `http(s)` origin or one of `CORS_ORIGINS` (the opaque origin `null` is
+rejected). Otherwise:
+
+```sh
+curl -s $API/api/civilizations -H 'Host: rebind.example:3001'
+# → 403 { "error": { "code": "FORBIDDEN", "message": "With AUTH_MODE=disabled the server only answers requests addressed to a loopback host (localhost, 127.0.0.1 or [::1])" } }
+curl -s $API/api/civilizations -H 'Origin: http://rebind.example'
+# → 403 { "error": { "code": "FORBIDDEN", "message": "With AUTH_MODE=disabled the server only accepts browser requests from loopback origins or CORS_ORIGINS" } }
+```
+
+Opening the development UI through a LAN address or another host name therefore needs
+token mode. Disabled mode still trusts every process on the same machine.
+
+CORS allows the origins in `CORS_ORIGINS` with methods `GET, POST, PUT, DELETE`, headers
 `Authorization, Content-Type`, and exposes `Content-Disposition`. The actor recorded in
-the audit log is `operator`, `viewer`, `anonymous` or `local-dev`.
+the audit log is `operator`, `viewer`, `anonymous` or `local-dev` (`engine` and `system`
+for entries the server writes itself).
+
+The API has no endpoint that reports the role of a token. The web UI learns it from
+the server's answers (a `403` to an operator action means a viewer token; a successful
+operator action means the operator token) and remembers it per token in the browser.
 
 ## Errors
 
@@ -89,16 +141,27 @@ Every error has the same body:
 }
 ```
 
-| Code                    | HTTP | When                                                                                                                                                                      |
-| ----------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VALIDATION_ERROR`      | 400  | invalid path, query or body (`details` lists the issues); malformed JSON. Payload-too-large (413) and unsupported media type (415) keep their HTTP status with this code. |
-| `CONFIRMATION_REQUIRED` | 400  | a destructive action without `confirm`, or with a name that does not match exactly                                                                                        |
-| `UNAUTHORIZED`          | 401  | missing or invalid token                                                                                                                                                  |
-| `FORBIDDEN`             | 403  | the viewer token used for a mutation                                                                                                                                      |
-| `NOT_FOUND`             | 404  | unknown civilization, citizen, building, snapshot or route                                                                                                                |
-| `CONFLICT`              | 409  | duplicate civilization or snapshot name; stepping while running; restoring a detached snapshot; incompatible state schema version                                         |
-| `HALTED`                | 409  | start, step or snapshot on a halted civilization                                                                                                                          |
-| `INTERNAL`              | 500  | unexpected failures, a failed checkpoint, a stored state that cannot be loaded                                                                                            |
+| Code                    | HTTP | When                                                                                                                                                                                                   |
+| ----------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `VALIDATION_ERROR`      | 400  | invalid path, query or body (`details` lists the issues); malformed JSON. Payload-too-large (413) and unsupported media type (415) keep their HTTP status with this code.                              |
+| `CONFIRMATION_REQUIRED` | 400  | a destructive action without `confirm`, or with a name that does not match exactly                                                                                                                     |
+| `UNAUTHORIZED`          | 401  | missing or invalid token (including a `?token=` on anything but a stream upgrade)                                                                                                                      |
+| `FORBIDDEN`             | 403  | the viewer token used for a mutation; with `AUTH_MODE=disabled`, a non-loopback `Host` or an untrusted `Origin`                                                                                        |
+| `NOT_FOUND`             | 404  | unknown civilization, citizen, building, snapshot or route                                                                                                                                             |
+| `CONFLICT`              | 409  | duplicate civilization or snapshot name; stepping while running; restoring a detached snapshot; a stored state of another state schema version (`Checkpoint uses state schema X; this server reads Y`) |
+| `HALTED`                | 409  | start, step or snapshot on a halted civilization                                                                                                                                                       |
+| `INTERNAL`              | 500  | unexpected failures, a failed write, a [stored state that cannot be loaded](#unloadable-stored-state)                                                                                                  |
+| `UNAVAILABLE`           | 503  | the server is at capacity (too many live stream connections); retry later                                                                                                                              |
+
+Messages of `500` errors caused by the database or another infrastructure failure
+never contain driver output. They read `<what> (<kind>; ref <8 hex>)`, for example
+`Checkpoint failed (database error P1001; ref 3f9c2a1b)`, where _what_ is one of
+`Checkpoint failed`, `Saving the status failed`, `Runner loop failed`,
+`Recording the halt failed`, `Reloading the last checkpoint failed` or
+`Loading the civilization failed`, and _kind_ is `database error <Prisma code>`,
+`database error`, `database unreachable` or `unexpected error`. The server log holds
+the full error under the same `errorRef`. The same format is used for `lastError` in
+summaries and stream messages.
 
 ## Pagination
 
@@ -133,10 +196,31 @@ the audit log.
 
 If the engine detects an invariant violation (or throws), the runner stops, drops
 the uncommitted ticks, records `status: halted` with `haltReason` and an audit entry
-`simulation.halted` (actor `engine`, details listing the violations), and reloads the
-last durable checkpoint. `start`, `step` and snapshot creation then return
+`simulation.halted` (actor `engine`, details with the `reason` and the violations), and
+reloads the last durable checkpoint. `start`, `step` and snapshot creation then return
 `409 HALTED`; reads, `pause`, speed changes, snapshot restore, reset and delete still
-work. Restore and reset clear the halt.
+work. Restore and reset clear the halt. A halt that has not been recorded yet when a
+restore or reset commits (for example, one detected while the restore read its
+snapshot) is written as `simulation.halted` in the rewind's transaction, before the
+`snapshot.restored` or `simulation.reset` entry.
+
+### Unloadable stored state
+
+If a civilization's stored checkpoint cannot be used — a corrupt or non-gzip blob, a
+failed hash or schema verification, an invariant violation, or a missing checkpoint —
+every request that needs the world (layout, frame, control, snapshot creation, stream) returns
+`500 INTERNAL` "The stored state could not be loaded: _reason_". The civilization is
+marked `status: halted` with `haltReason` "Stored state could not be loaded: _reason_.
+Restore a snapshot or reset.", and one `simulation.state_unloadable` audit entry (actor
+`system`) is written per distinct reason, so lists show the problem. **`POST …/reset`
+and `POST …/snapshots/:snapshotId/restore` work in this state and recover it**: reset
+regenerates the world from the seed and configuration in the database, restore uses
+the verified snapshot; neither needs the corrupt checkpoint. Their audit details then
+include `recoveredFromUnloadableState: true` and `fromTick`. Delete also works.
+
+A checkpoint written with a different state schema version is not treated as corrupt:
+it returns `409 CONFLICT` ("Checkpoint uses state schema X; this server reads Y") and is
+not marked halted, because a server with the matching version can read it.
 
 ---
 
@@ -158,7 +242,7 @@ curl -s $API/api/meta
 {
   "engineVersion": "0.1.0",
   "authMode": "token",
-  "readRequiresToken": false,
+  "readRequiresToken": true,
   "frameRate": 5,
   "maxStepsPerRequest": 1000
 }
@@ -175,9 +259,10 @@ curl -s $API/api/meta
 `CivilizationSummary` fields: `id`, `name`, `seed`, `status`, `speed` (target ticks per
 second, 0 = maximum), `durableTick` (tick of the latest checkpoint), `tick` (in-memory
 tick when loaded, else the durable tick), `calendar` (`tick, day, hour, dayOfSeason,
-dayOfYear, season, year`), `population`, `engineVersion`, `haltReason`, `lastError` (last
-persistence error, if the latest checkpoint attempt failed), `loaded` (whether a runner
-holds it in memory), `createdAt`, `updatedAt`.
+dayOfYear, season, year`), `population`, `engineVersion`, `haltReason`, `lastError` (the
+last persistence failure while it is unresolved, in the client-safe format described
+under [errors](#errors)), `loaded` (whether a runner holds it in memory; paused runners
+nobody uses are unloaded after 15 minutes), `createdAt`, `updatedAt`.
 
 ### `POST /api/civilizations` — operate
 
@@ -200,7 +285,7 @@ curl -s -X POST $API/api/civilizations -H "$AUTH" -H "$JSON" \
 `configSchemaVersion`:
 
 ```json
-{ "id": "20a4ea01-ff81-4762-ae6e-aa6e71bb28b8", "name": "Demo One", "seed": "demo-1",
+{ "id": "6dfb1e4c-edf2-4709-a429-9003aa0419af", "name": "Demo One", "seed": "demo-1",
   "status": "paused", "speed": 5, "durableTick": 0, "tick": 0,
   "calendar": { "tick": 0, "day": 1, "hour": 0, "dayOfSeason": 0, "dayOfYear": 0, "season": "spring", "year": 1 },
   "population": 100, "engineVersion": "0.1.0", "haltReason": null, "lastError": null, "loaded": true, …,
@@ -232,18 +317,28 @@ All control operations of one civilization are serialised on a per-civilization 
 so they never interleave with each other or with a checkpoint. Each returns the updated
 `CivilizationSummary`.
 
+Control actions are atomic: `start`, `pause`, `step` and speed changes write their state
+change and their audit entry (`simulation.started`, `simulation.paused`,
+`simulation.stepped`, `simulation.speed_changed`) in one transaction, and the server
+changes the running simulation only after that commit. If the write fails the action
+returns `500 INTERNAL` and nothing changes: `start` does not start the loop and the
+speed stays as it was. A failed `step` keeps its ticks in memory and writes them with
+the next successful checkpoint.
+
 ### `POST /api/civilizations/:id/control` — operate
 
 Body (discriminated by `action`):
 
-| Body                               | Effect                                                                                                      |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `{ "action": "start" }`            | runs the background tick loop at the civilization's speed; no-op if already running; `409 HALTED` if halted |
-| `{ "action": "pause" }`            | stops the loop and checkpoints the current tick; also retries persistence after a failed checkpoint         |
-| `{ "action": "step", "steps": n }` | `n` = 1–1000 (default 1) ticks on a paused civilization, then a checkpoint; `409 CONFLICT` while running    |
+| Body                               | Effect                                                                                                                                                      |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{ "action": "start" }`            | runs the background tick loop at the civilization's speed; no-op if already running; `409 HALTED` if halted                                                 |
+| `{ "action": "pause" }`            | stops the loop and makes `paused` durable (a checkpoint, or a status-only write when nothing is uncommitted); also retries persistence after a failed write |
+| `{ "action": "step", "steps": n }` | `n` = 1–1000 (default 1) ticks on a paused civilization, then a checkpoint; `409 CONFLICT` while running                                                    |
 
-Steps run in time slices (≤ 12 ms each) so other requests stay responsive. If an
-invariant fails during a step, the response is `200` with `status: "halted"`.
+Steps run in time slices of about 12 ms (the budget is checked after each tick) so
+other requests stay responsive; at the maximum population of 5,000 a single tick can
+take 15–40 ms. If an invariant fails during a step, the response is `200` with
+`status: "halted"`.
 
 ```sh
 curl -s -X POST $API/api/civilizations/$ID/control -H "$AUTH" -H "$JSON" -d '{"action":"step","steps":240}'
@@ -263,7 +358,9 @@ Body `{ "confirm": "<name>" }`. Regenerates the world from the same seed and
 configuration (tick 0, identical to the original genesis), deletes all events and
 metric samples and re-inserts the genesis records, detaches every snapshot taken after
 tick 0, clears any halt, and leaves the civilization `paused`. Stream subscribers
-receive `reset`.
+receive `reset`. The audit entry `simulation.reset` records `fromTick` and the genesis
+`stateHash`, e.g. `{ "fromTick": 293, "stateHash": "3815410543285c0938f9569f681be08d" }`.
+Reset also [recovers an unloadable stored state](#unloadable-stored-state).
 
 ## World
 
@@ -291,17 +388,17 @@ Each citizen is a [frame tuple](#frame-tuples).
 
 Offset-paginated list from the `citizen` projection.
 
-| Query         | Type / bounds                                 | Default | Meaning                                                                                                                    |
-| ------------- | --------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `search`      | string ≤ 80                                   | —       | digits only: exact citizen id; otherwise every word (max 4) must match the first or last name (case-insensitive substring) |
-| `lifeStage`   | `child`, `adult`, `elder`                     | —       | filter                                                                                                                     |
-| `activity`    | `sleeping`, `at_home`, `leisure`, `traveling` | —       | filter                                                                                                                     |
-| `education`   | `none`, `primary`, `secondary`, `tertiary`    | —       | filter                                                                                                                     |
-| `householdId` | integer 1–10,000,000                          | —       | filter                                                                                                                     |
-| `sort`        | `id`, `name`, `balance`, `energy`, `age`      | `id`    | `name` = last, first; ties broken by id                                                                                    |
-| `order`       | `asc`, `desc`                                 | `asc`   |                                                                                                                            |
-| `limit`       | 1–200                                         | 50      |                                                                                                                            |
-| `offset`      | 0–1,000,000                                   | 0       |                                                                                                                            |
+| Query         | Type / bounds                                 | Default | Meaning                                                                                                                                                                |
+| ------------- | --------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search`      | string ≤ 80                                   | —       | digits only: exact citizen id; otherwise every word (max 4) must match the first or last name (case-insensitive literal substring: `%`, `_` and `\` are not wildcards) |
+| `lifeStage`   | `child`, `adult`, `elder`                     | —       | filter                                                                                                                                                                 |
+| `activity`    | `sleeping`, `at_home`, `leisure`, `traveling` | —       | filter                                                                                                                                                                 |
+| `education`   | `none`, `primary`, `secondary`, `tertiary`    | —       | filter                                                                                                                                                                 |
+| `householdId` | integer 1–10,000,000                          | —       | filter                                                                                                                                                                 |
+| `sort`        | `id`, `name`, `balance`, `energy`, `age`      | `id`    | `name` = last, first; ties broken by id                                                                                                                                |
+| `order`       | `asc`, `desc`                                 | `asc`   |                                                                                                                                                                        |
+| `limit`       | 1–200                                         | 50      |                                                                                                                                                                        |
+| `offset`      | 0–1,000,000                                   | 0       |                                                                                                                                                                        |
 
 ```sh
 curl -s "$API/api/civilizations/$ID/citizens?sort=balance&order=desc&limit=2"
@@ -326,19 +423,19 @@ curl -s "$API/api/civilizations/$ID/citizens?sort=balance&order=desc&limit=2"
   "birthTick": -27356,
   "personality": { "openness": 0.532, "conscientiousness": 0.705, "extraversion": 0.613, "agreeableness": 0.382, "neuroticism": 0.219 },
   "skills": { "farming": 39.6, "baking": 42.6, "crafting": 44.8, "commerce": 48, "management": 78.8 },
-  "destinationBuildingId": null, "home": { "id": 46, "name": "12 Willow Street" },
-  "location": { "id": 46, "name": "12 Willow Street", "kind": "house" },
+  "destinationBuildingId": null, "home": { "id": 46, "name": "67 Elm Street" },
+  "location": { "id": 46, "name": "67 Elm Street", "kind": "house" },
   "householdMembers": [{ "id": 2, "firstName": "Alba", "lastName": "Wagner", "ageYears": 40 }], "asOfTick": 240 }
 ```
 
 ### `GET /api/civilizations/:id/buildings` — read
 
-| Query    | Type / bounds            | Default | Meaning                                |
-| -------- | ------------------------ | ------- | -------------------------------------- |
-| `kind`   | `house`, `plaza`, `park` | —       | filter                                 |
-| `search` | string ≤ 80              | —       | case-insensitive substring of the name |
-| `limit`  | 1–500                    | 100     |                                        |
-| `offset` | 0–1,000,000              | 0       |                                        |
+| Query    | Type / bounds            | Default | Meaning                                                                             |
+| -------- | ------------------------ | ------- | ----------------------------------------------------------------------------------- |
+| `kind`   | `house`, `plaza`, `park` | —       | filter                                                                              |
+| `search` | string ≤ 80              | —       | case-insensitive literal substring of the name (`%`, `_` and `\` are not wildcards) |
+| `limit`  | 1–500                    | 100     |                                                                                     |
+| `offset` | 0–1,000,000              | 0       |                                                                                     |
 
 Ordered by id. Items: `id, kind, name, x, y, width, height, capacity`.
 
@@ -349,7 +446,7 @@ Ordered by id. Items: `id, kind, name, x, y, width, height, capacity`.
       "id": 1,
       "kind": "plaza",
       "name": "Central Plaza",
-      "x": 8,
+      "x": 15,
       "y": 15,
       "width": 6,
       "height": 6,
@@ -421,10 +518,10 @@ curl -s "$API/api/civilizations/$ID/metrics?keys=population.total,activity.leisu
 {
   "keys": ["population.total", "activity.leisure", "needs.lowEnergyShare"],
   "rows": [
-    [10, 100, 8, 0],
-    [11, 100, 16, 0],
+    [10, 100, 10, 0],
+    [11, 100, 17, 0],
     [12, 100, 18, 0],
-    [13, 100, 14, 0]
+    [13, 100, 15, 0]
   ],
   "bucketTicks": 1,
   "fromTick": 10,
@@ -433,7 +530,7 @@ curl -s "$API/api/civilizations/$ID/metrics?keys=population.total,activity.leisu
 ```
 
 With `maxPoints=10` over 241 samples the response has `bucketTicks: 25` and 10 rows
-stamped 24, 49, 74, …. Metric definitions: [ECONOMIC_MODEL.md](ECONOMIC_MODEL.md#metrics).
+stamped 24, 49, 74, …, 224 and 240 (the last bucket holds ticks 225–240). Metric definitions: [ECONOMIC_MODEL.md](ECONOMIC_MODEL.md#metrics).
 
 ### `GET /api/civilizations/:id/audit` — read
 
@@ -447,7 +544,7 @@ Control actions, newest first. Query `before` (id cursor) and `limit` (1–200, 
       "id": 8,
       "action": "simulation.paused",
       "actor": "operator",
-      "tick": 292,
+      "tick": 290,
       "details": {},
       "createdAt": "…"
     },
@@ -488,8 +585,8 @@ SnapshotDto`; `409 CONFLICT` for a duplicate name; `409 HALTED` when halted.
 ```sh
 curl -s -X POST $API/api/civilizations/$ID/snapshots -H "$AUTH" -H "$JSON" \
   -d '{"name":"day 11","note":"before the experiment"}'
-# → { "id": "5eebddfa-…", "name": "day 11", "note": "before the experiment", "tick": 240,
-#     "stateHash": "a0aac4798d1ec307007ff36a7c006d26", "sizeBytes": 56768, "createdAt": "…", "detachedAt": null }
+# → { "id": "f47259d5-…", "name": "day 11", "note": "before the experiment", "tick": 240,
+#     "stateHash": "1273ba1173fad918ccc81e4d7cf0ac37", "sizeBytes": 56767, "createdAt": "…", "detachedAt": null }
 ```
 
 ### `POST /api/civilizations/:id/snapshots/:snapshotId/restore` — operate, [destructive](#destructive-actions)
@@ -500,6 +597,9 @@ events and metric samples after the snapshot are deleted; snapshots taken after 
 marked `detachedAt` (they belong to the abandoned timeline and cannot be restored in
 place — `409 CONFLICT`); status becomes `paused`. The restored state's hash equals the
 snapshot's `stateHash`, and continuing reproduces the original continuation exactly.
+The audit entry `snapshot.restored` records `snapshotId`, `name`, `fromTick`, `toTick` and the
+`stateHash`. Restore also
+[recovers an unloadable stored state](#unloadable-stored-state).
 
 ```sh
 curl -s -X POST $API/api/civilizations/$ID/snapshots/$SNAPSHOT/restore -H "$AUTH" -H "$JSON" -d '{}'
@@ -511,8 +611,12 @@ curl -s -X POST $API/api/civilizations/$ID/snapshots/$SNAPSHOT/restore -H "$AUTH
 ## Exports
 
 Downloads with `content-disposition: attachment` and `cache-control: no-store`. Each
-export is cut at the durable checkpoint observed when it starts. Large exports are
-streamed in pages, so server memory stays bounded.
+export is cut at the durable checkpoint observed when it starts, so rows committed by
+later checkpoints are not included. Large exports are streamed in pages, so server
+memory stays bounded. **If a snapshot restore, a reset or a delete commits while an
+export streams, the transfer is aborted** (the connection is reset and the chunked body
+is incomplete, so `curl` reports an error): a file is either one consistent timeline or
+visibly incomplete, never a silently shortened or spliced one. Download it again.
 
 | Endpoint                            | Query                         | Content                                                                                                                                                      |
 | ----------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -536,10 +640,18 @@ The config export is what [EXPERIMENTS.md](EXPERIMENTS.md) uses to reproduce a r
 ## WebSocket stream
 
 `GET /api/civilizations/:id/stream` (WebSocket upgrade; `read` auth, token via
-`?token=` from browsers). The civilization is resolved and authorised **before** the
-upgrade, so an unknown id gets a plain `404` and a bad token `401`/`403`. A plain
-(non-upgrade) `GET` returns `400`. The stream is server → client only; anything a
-client sends is ignored (maximum client frame 4 KiB).
+`?token=` from browsers or the `Authorization` header). The civilization is resolved
+and authorised **before** the upgrade, so an unknown id gets a plain `404` and a bad
+token `401`/`403`. A plain (non-upgrade) `GET` returns `400` ("This endpoint requires a
+WebSocket upgrade"). The stream is server → client only; anything a client sends is
+ignored (maximum client frame 4 KiB).
+
+**Connection limits.** The server accepts at most `STREAM_MAX_CONNECTIONS` live streams
+in total (default 256) and `STREAM_MAX_CONNECTIONS_PER_ADDRESS` per client IP address
+(default 32; behind a reverse proxy this is per proxy address). Over a limit the upgrade
+is refused with `503 UNAVAILABLE` ("Too many live stream connections; try again later")
+before the civilization is loaded; a connection that races past the check is closed
+right after the upgrade with WebSocket close code `1013` (try again later).
 
 ```js
 const ws = new WebSocket(`ws://127.0.0.1:3001/api/civilizations/${id}/stream?token=${token}`);
@@ -561,17 +673,17 @@ Every message is one JSON object with a `type` (`StreamMessage` in
 | `reset`      | `tick`                                                                                | the world was replaced (snapshot restore, reset, or reload after a halt)                               |
 | `deleted`    | —                                                                                     | the civilization was deleted; the server then closes with code 1000                                    |
 
-A real sequence (connect to a paused civilization at tick 292, step 3 ticks, then
-reset):
+A real sequence (connect to a paused civilization at tick 252, noon of day 11, step 3
+ticks, then reset):
 
 ```
-hello      status=paused tick=292 durableTick=292 speed=25
-keyframe   tick=292 citizens=100
-checkpoint tick=295
-delta      tick=295 citizens=87        ← only the 87 tuples that changed
+hello      status=paused tick=252 durableTick=252 speed=25
+keyframe   tick=252 citizens=100
+checkpoint tick=255
+delta      tick=255 citizens=31        ← only the 31 tuples that changed
 reset      tick=0
 keyframe   tick=0 citizens=100
-status     status=paused tick=0 durableTick=0
+status     status=paused tick=0 durableTick=0 speed=25
 ```
 
 ### Frame tuples
@@ -605,8 +717,10 @@ recent 200 are kept and the rest are counted in `dropped`. The REST endpoint
 A client whose socket buffer holds more than 1 MiB is congested: it is skipped for
 deltas and events (the skipped events are added to its `dropped` count) and marked
 out of sync. Once its buffer drains it receives a fresh keyframe, so a delta is never
-applied to a stale base. Clients are pinged every 30 s; a client that misses a pong is
-terminated.
+applied to a stale base. A client that stays congested continuously for 10 s
+(`STALLED_CLIENT_MS`, checked when frames are sent) is disconnected, so a client that
+stops reading cannot pin server memory. Clients are pinged every 30 s; a client that
+misses a pong is terminated.
 
 ### Reset semantics
 

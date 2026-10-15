@@ -1,8 +1,15 @@
 import type { CivilizationSummary } from '@civ/shared';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useCivilizations, useDeleteCivilization } from '../../api/queries';
-import { EmptyState, ErrorMessage, LoadingRegion, StatusPill } from '../../components/Feedback';
+import { useAccess } from '../../api/useAccess';
+import {
+  AccessNote,
+  EmptyState,
+  ErrorMessage,
+  LoadingRegion,
+  StatusPill,
+} from '../../components/Feedback';
 import { TypedConfirmDialog } from '../../components/Modal';
 import { useToast } from '../../components/Toasts';
 import { formatDateTime, formatInteger, formatTickCalendar } from '../../lib/format';
@@ -10,14 +17,19 @@ import { CreateCivilizationForm } from './CreateCivilizationForm';
 
 /*
  * Home page: every civilization (experiment run) on this server, plus the genesis form.
+ * Deleting needs operator rights (see useAccess); without them it is disabled and the
+ * reason is shown above the table.
  */
 
 function CivilizationTable({
   items,
   onDelete,
+  readOnlyNoteId,
 }: {
   items: CivilizationSummary[];
   onDelete: (civ: CivilizationSummary) => void;
+  /** Id of the note explaining why deleting is unavailable, or null when it is allowed. */
+  readOnlyNoteId: string | null;
 }) {
   return (
     <div className="table-scroll">
@@ -62,6 +74,8 @@ function CivilizationTable({
                   type="button"
                   className="btn btn-sm btn-danger-ghost"
                   aria-label={`Delete ${c.name}`}
+                  disabled={readOnlyNoteId !== null}
+                  aria-describedby={readOnlyNoteId ?? undefined}
                   data-testid="delete-civilization"
                   onClick={() => onDelete(c)}
                 >
@@ -79,7 +93,9 @@ function CivilizationTable({
 export function CivilizationsPage() {
   const list = useCivilizations();
   const remove = useDeleteCivilization();
+  const access = useAccess();
   const toast = useToast();
+  const noteId = useId();
   const [target, setTarget] = useState<CivilizationSummary | null>(null);
 
   const close = () => {
@@ -107,7 +123,16 @@ export function CivilizationsPage() {
             </EmptyState>
           )}
           {list.data && list.data.items.length > 0 && (
-            <CivilizationTable items={list.data.items} onDelete={setTarget} />
+            <>
+              {!access.canOperate && access.reason && (
+                <AccessNote id={noteId} reason={access.reason} />
+              )}
+              <CivilizationTable
+                items={list.data.items}
+                onDelete={setTarget}
+                readOnlyNoteId={access.canOperate ? null : noteId}
+              />
+            </>
           )}
         </div>
       </section>

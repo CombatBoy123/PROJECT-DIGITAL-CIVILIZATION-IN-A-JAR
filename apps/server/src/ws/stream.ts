@@ -37,13 +37,23 @@ import type { RunnerNotice, SimulationRunner } from '../runner/runner.js';
  *
  * Backpressure: a client whose socket buffer exceeds BACKPRESSURE_BYTES skips
  * deltas and events (counted as dropped); once drained it receives a fresh
- * keyframe, so a delta is never applied to a stale base.
+ * keyframe, so a delta is never applied to a stale base. A client that stays
+ * congested for STALLED_CLIENT_MS is disconnected, so a client that stops reading
+ * cannot pin server memory.
+ *
+ * Connections are capped in total and per client address (STREAM_MAX_CONNECTIONS,
+ * STREAM_MAX_CONNECTIONS_PER_ADDRESS): beyond the cap an upgrade is refused with
+ * 503 UNAVAILABLE.
  */
 
 /** Socket buffer above which a client is considered congested. */
 export const BACKPRESSURE_BYTES = 1 << 20;
+/** Continuous congestion after which a client is disconnected. */
+export const STALLED_CLIENT_MS = 10_000;
 /** Liveness ping interval; clients that miss a pong are terminated. */
 const PING_INTERVAL_MS = 30_000;
+/** WebSocket close code "Try Again Later" (RFC 6455 registry). */
+const CLOSE_TRY_AGAIN_LATER = 1013;
 
 interface Client {
   socket: WebSocket;
@@ -52,6 +62,8 @@ interface Client {
   /** Events skipped for this client since its last events message. */
   dropped: number;
   alive: boolean;
+  /** When the client's socket buffer last went above BACKPRESSURE_BYTES (null: not congested). */
+  congestedSince: number | null;
 }
 
 interface Baseline {
@@ -131,7 +143,7 @@ export class CivilizationStream {
   }
 
   add(socket: WebSocket): void {
-    const client: Client = { socket, synced: false, dropped: 0, alive: true };
+    const client: Client = { socket, synced: false, dropped: 0, alive: true, congestedSince: null };
     this.clients.add(client);
     socket.on('pong', () => {
       client.alive = true;
@@ -274,11 +286,18 @@ export class CivilizationStream {
     for (const client of this.clients) {
       const congested = client.socket.bufferedAmount > BACKPRESSURE_BYTES;
       if (congested) {
+        client.congestedSince ??= this.lastFrameAt;
+        if (this.lastFrameAt - client.congestedSince >= STALLED_CLIENT_MS) {
+          this.log.debug('Disconnecting a stalled stream client');
+          client.socket.terminate();
+          continue;
+        }
         // Skip everything; the client resynchronises with a keyframe once drained.
         if (frame && (deltaData || !client.synced)) client.synced = false;
         client.dropped += events.length;
         continue;
       }
+      client.congestedSince = null;
       if (frame && !client.synced) {
         keyframeData ??= frameMessage('keyframe', frame, frame.citizens);
         this.sendKeyframe(client, frame, keyframeData);
@@ -308,16 +327,61 @@ export class CivilizationStream {
   }
 }
 
+export interface StreamLimits {
+  maxConnections: number;
+  maxConnectionsPerAddress: number;
+}
+
 /** All live streams of this server, one per civilization with subscribers. */
 export class StreamHub {
   private readonly streams = new Map<string, CivilizationStream>();
+  private connections = 0;
+  private readonly perAddress = new Map<string, number>();
 
   constructor(
     private readonly frameRate: number,
     private readonly log: FastifyBaseLogger,
+    private readonly limits: StreamLimits,
   ) {}
 
-  attach(runner: SimulationRunner, socket: WebSocket): void {
+  /** Open stream connections (all civilizations). */
+  get connectionCount(): number {
+    return this.connections;
+  }
+
+  /** Throws UNAVAILABLE when another connection from `address` would exceed a cap. */
+  assertCapacity(address: string): void {
+    if (this.connections >= this.limits.maxConnections) {
+      throw new AppError('UNAVAILABLE', 'Too many live stream connections; try again later');
+    }
+    if ((this.perAddress.get(address) ?? 0) >= this.limits.maxConnectionsPerAddress) {
+      throw new AppError(
+        'UNAVAILABLE',
+        'Too many live stream connections from this address; close other streams first',
+      );
+    }
+  }
+
+  /**
+   * Subscribe an upgraded socket. The caps are re-checked here (the upgrade happens
+   * after the pre-upgrade check), and a socket beyond them is closed with 1013.
+   */
+  attach(runner: SimulationRunner, socket: WebSocket, address: string): void {
+    try {
+      this.assertCapacity(address);
+    } catch {
+      socket.close(CLOSE_TRY_AGAIN_LATER, 'Too many stream connections');
+      return;
+    }
+    this.connections++;
+    this.perAddress.set(address, (this.perAddress.get(address) ?? 0) + 1);
+    socket.once('close', () => {
+      this.connections--;
+      const left = (this.perAddress.get(address) ?? 1) - 1;
+      if (left > 0) this.perAddress.set(address, left);
+      else this.perAddress.delete(address);
+    });
+
     let stream = this.streams.get(runner.id);
     if (!stream || stream.runner !== runner) {
       stream?.close();
@@ -349,12 +413,17 @@ const resolvedRunners = new WeakMap<FastifyRequest, SimulationRunner>();
  * civilization is resolved before the upgrade, so unknown ids get a plain 404.
  */
 export function registerStreamRoute(app: FastifyInstance, ctx: AppContext): StreamHub {
-  const hub = new StreamHub(ctx.env.FRAME_RATE, app.log);
+  const hub = new StreamHub(ctx.env.FRAME_RATE, app.log, {
+    maxConnections: ctx.env.STREAM_MAX_CONNECTIONS,
+    maxConnectionsPerAddress: ctx.env.STREAM_MAX_CONNECTIONS_PER_ADDRESS,
+  });
   app.route({
     method: 'GET',
     url: '/api/civilizations/:id/stream',
     preValidation: async (request) => {
       const { id } = parseInput(CivilizationParamsSchema, request.params, 'path');
+      // Before loading the civilization, so refused connections cost nothing.
+      hub.assertCapacity(request.ip);
       resolvedRunners.set(request, await ctx.runners.get(id));
     },
     handler: async () => {
@@ -366,7 +435,7 @@ export function registerStreamRoute(app: FastifyInstance, ctx: AppContext): Stre
         socket.close(1011, 'Civilization not resolved');
         return;
       }
-      hub.attach(runner, socket);
+      hub.attach(runner, socket, request.ip);
     },
   });
   app.addHook('onClose', async () => hub.closeAll());

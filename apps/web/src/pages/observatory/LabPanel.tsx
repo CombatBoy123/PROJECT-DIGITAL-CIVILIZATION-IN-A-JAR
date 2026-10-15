@@ -1,6 +1,8 @@
 import type { ApiRoutePath } from '@civ/shared';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { useResetWorld } from '../../api/queries';
+import { useAccess } from '../../api/useAccess';
+import { AccessNote } from '../../components/Feedback';
 import { TypedConfirmDialog } from '../../components/Modal';
 import { useToast } from '../../components/Toasts';
 import { downloadExport } from '../../lib/download';
@@ -8,7 +10,8 @@ import { useObservatory } from './context';
 
 /*
  * Laboratory tab: the destructive "reset world" experiment control and data exports.
- * Exports are fetched with the auth header and saved as blobs.
+ * Exports are fetched with the auth header and saved as blobs. Reset needs operator
+ * rights (see useAccess); without them the button is disabled and says why.
  */
 
 const EXPORTS: { path: ApiRoutePath; label: string; description: string; file: string }[] = [
@@ -73,7 +76,9 @@ function ExportButton({ entry }: { entry: (typeof EXPORTS)[number] }) {
 export function LabPanel() {
   const { civilizationId, civilizationName } = useObservatory();
   const reset = useResetWorld(civilizationId);
+  const access = useAccess();
   const toast = useToast();
+  const noteId = useId();
   const [open, setOpen] = useState(false);
 
   const close = () => {
@@ -96,10 +101,13 @@ export function LabPanel() {
           type="button"
           className="btn btn-danger"
           data-testid="reset-world"
+          disabled={!access.canOperate}
+          aria-describedby={access.canOperate ? undefined : noteId}
           onClick={() => setOpen(true)}
         >
           Reset world…
         </button>
+        {!access.canOperate && access.reason && <AccessNote id={noteId} reason={access.reason} />}
       </section>
       <section aria-labelledby="exports-title">
         <h3 id="exports-title" className="section-title">

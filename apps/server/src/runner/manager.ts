@@ -3,8 +3,16 @@ import type { CivilizationStatus } from '@civ/shared';
 import type { Prisma } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
 import { AppError } from '../http/errors.js';
+import { reportFailure } from '../http/failure.js';
+import { findCivilization, type CivilizationRecord } from '../persistence/civilization-queries.js';
 import { statusFromDb } from '../persistence/mappers.js';
-import type { CivilizationStore } from '../persistence/store.js';
+import { UnloadableStateError, type CivilizationStore } from '../persistence/store.js';
+import {
+  resetReplacement,
+  restoreReplacement,
+  rewindWrite,
+  type WorldReplacement,
+} from './replacement.js';
 import { SimulationRunner, type RunnerSettings } from './runner.js';
 
 export interface RunnerManagerOptions {
@@ -20,10 +28,6 @@ export interface RunnerManagerOptions {
 
 /** Default idle time after which a paused runner is unloaded. */
 export const DEFAULT_IDLE_EVICT_MS = 15 * 60_000;
-
-function message(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
 
 /**
  * Owns the loaded civilizations of this server process. A civilization is loaded
@@ -102,6 +106,80 @@ export class RunnerManager {
   }
 
   /**
+   * Regenerate a civilization from its seed (SimulationRunner.reset). Also the way out
+   * when its stored state cannot be loaded: the seed and configuration come from the
+   * database, so the corrupt checkpoint is not needed.
+   */
+  async reset(id: string, actor: string): Promise<void> {
+    const runner = await this.runnerOrRecover(id, async (civ) =>
+      resetReplacement(civ.row.seed, civ.config, this.settings.invariants, actor, {
+        fromTick: civ.row.currentTick,
+        recoveredFromUnloadableState: true,
+      }),
+    );
+    if (runner) await runner.reset(actor);
+  }
+
+  /**
+   * Rewind a civilization to a snapshot (SimulationRunner.restoreSnapshot); like
+   * reset, this also works when the current stored state cannot be loaded.
+   */
+  async restoreSnapshot(id: string, snapshotId: string, actor: string): Promise<void> {
+    const runner = await this.runnerOrRecover(id, async (civ) =>
+      restoreReplacement(this.store, id, snapshotId, this.settings.invariants, actor, {
+        fromTick: civ.row.currentTick,
+        recoveredFromUnloadableState: true,
+      }),
+    );
+    if (runner) await runner.restoreSnapshot(snapshotId, actor);
+  }
+
+  /**
+   * The runner for a world replacement, or — when the stored state cannot be loaded —
+   * perform the replacement directly and return null (the work is done). The direct
+   * replacement occupies the single-flight slot of `loading`, so concurrent requests
+   * wait for it and then use the new runner.
+   */
+  private async runnerOrRecover(
+    id: string,
+    build: (civ: CivilizationRecord) => Promise<WorldReplacement>,
+  ): Promise<SimulationRunner | null> {
+    for (;;) {
+      try {
+        return await this.get(id);
+      } catch (err) {
+        if (!(err instanceof UnloadableStateError)) throw err;
+      }
+      const pending = this.loading.get(id);
+      if (pending) {
+        await pending.catch(() => undefined);
+        continue;
+      }
+      const recovery = this.replaceUnloadable(id, build).finally(() => this.loading.delete(id));
+      this.loading.set(id, recovery);
+      await recovery;
+      return null;
+    }
+  }
+
+  private async replaceUnloadable(
+    id: string,
+    build: (civ: CivilizationRecord) => Promise<WorldReplacement>,
+  ): Promise<SimulationRunner> {
+    const civ = await findCivilization(this.store.prisma, id);
+    const replacement = await build(civ);
+    await this.store.rewind(rewindWrite(id, replacement, null));
+    this.log.warn(
+      { civilizationId: id, action: replacement.audit.action },
+      'Replaced a civilization whose stored state could not be loaded',
+    );
+    if (this.closing) throw new AppError('INTERNAL', 'The server is shutting down');
+    const runner = this.createRunner(id, replacement.simulation, 'paused', civ.row.speed, null);
+    this.loaded.set(id, runner);
+    return runner;
+  }
+
+  /**
    * Startup recovery. Civilizations stored as RUNNING were interrupted by a restart:
    * with `resume`, load and continue them from their last checkpoint; otherwise mark
    * them paused with an audit entry.
@@ -121,6 +199,8 @@ export class RunnerManager {
           this.log.info({ civilizationId: id, tick }, 'Resumed interrupted civilization');
           continue;
         } catch (err) {
+          // An unloadable state was already marked HALTED (with its reason) by load().
+          if (err instanceof UnloadableStateError) continue;
           this.log.error({ err, civilizationId: id }, 'Could not resume civilization; pausing it');
         }
       }
@@ -145,10 +225,20 @@ export class RunnerManager {
     try {
       loadedState = await this.store.loadCheckpoint(id, { invariants: this.settings.invariants });
     } catch (err) {
+      if (err instanceof UnloadableStateError) {
+        // Corrupt blob, hash mismatch, invariant violation, …: show it as a halt so
+        // lists and the observatory say so; reset or restore recovers.
+        this.log.error({ err, civilizationId: id }, 'Stored state could not be loaded');
+        await this.store
+          .markUnloadable(id, err.reason)
+          .catch((markErr: unknown) =>
+            this.log.error({ err: markErr, civilizationId: id }, 'Could not mark state unloadable'),
+          );
+        throw err;
+      }
       if (err instanceof AppError) throw err;
-      // Corrupt blob, hash mismatch or a stored state that violates invariants.
-      this.log.error({ err, civilizationId: id }, 'Failed to load civilization state');
-      throw new AppError('INTERNAL', `The stored state could not be loaded: ${message(err)}`);
+      const log = this.log.child({ civilizationId: id });
+      throw new AppError('INTERNAL', reportFailure(log, err, 'Loading the civilization failed'));
     }
     const { civ, simulation } = loadedState;
     if (this.closing) throw new AppError('INTERNAL', 'The server is shutting down');

@@ -9,7 +9,11 @@ import type { PrismaClient } from '@prisma/client';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { AppError, notFound, parseInput } from '../http/errors.js';
 import { readConfig } from '../persistence/civilization-queries.js';
-import { iterateEvents, iterateMetricSamples } from '../persistence/history-queries.js';
+import {
+  iterateEvents,
+  iterateMetricSamples,
+  timelineGuard,
+} from '../persistence/history-queries.js';
 import { toNumber } from '../persistence/mappers.js';
 import type { AppContext } from './context.js';
 import { assertTickRange, parseEventTypes, parseMetricKeys } from './history.js';
@@ -49,7 +53,10 @@ function csvCell(value: number | null | undefined): string {
 /**
  * Downloads. Exports read the history in keyset pages and stream the response, so
  * memory stays bounded regardless of history length. Each export is cut at the
- * durable boundary observed when it starts.
+ * durable boundary observed when it starts, and pinned to the timeline generation
+ * observed then: if a restore, reset or delete commits while it streams, the
+ * response is aborted (the client sees an incomplete transfer, not a short file
+ * that looks complete). The error is logged.
  */
 export function registerExportRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { prisma } = ctx;
@@ -83,10 +90,13 @@ export function registerExportRoutes(app: FastifyInstance, ctx: AppContext): voi
     const keys = parseMetricKeys(q.keys);
     const { civ, checkpoint } = await durableBoundary(prisma, id);
     const throughTick = Math.min(q.toTick ?? checkpoint.tick, checkpoint.tick);
-    const pages = iterateMetricSamples(prisma, id, keys, {
-      fromTick: q.fromTick ?? 0,
-      throughTick,
-    });
+    const pages = iterateMetricSamples(
+      prisma,
+      id,
+      keys,
+      { fromTick: q.fromTick ?? 0, throughTick },
+      { verify: timelineGuard(prisma, id, civ.timeline) },
+    );
     async function* lines(): AsyncGenerator<string> {
       yield `tick,${keys.join(',')}\n`;
       for await (const rows of pages) {
@@ -111,6 +121,7 @@ export function registerExportRoutes(app: FastifyInstance, ctx: AppContext): voi
       id,
       { types, fromTick: q.fromTick, toTick: q.toTick },
       toNumber(checkpoint.nextEventSeq),
+      { verify: timelineGuard(prisma, id, civ.timeline) },
     );
     async function* lines(): AsyncGenerator<string> {
       for await (const events of pages) {

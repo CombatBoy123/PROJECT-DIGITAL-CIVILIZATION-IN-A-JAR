@@ -128,8 +128,7 @@ export function registerHistoryRoutes(app: FastifyInstance, ctx: AppContext): vo
       const { id, snapshotId } = parseInput(SnapshotParamsSchema, request.params, 'path');
       const { row } = await findCivilization(prisma, id);
       requireConfirmation(request.body, row.name);
-      const runner = await runners.get(id);
-      await runner.restoreSnapshot(snapshotId, request.principal.actor);
+      await runners.restoreSnapshot(id, snapshotId, request.principal.actor);
       return civilizationSummary(prisma, runners, id);
     },
   );

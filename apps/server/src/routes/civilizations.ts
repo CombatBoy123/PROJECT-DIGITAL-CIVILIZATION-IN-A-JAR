@@ -114,8 +114,7 @@ export function registerCivilizationRoutes(app: FastifyInstance, ctx: AppContext
     const { id } = params(request.params);
     const { row } = await findCivilization(prisma, id);
     requireConfirmation(request.body, row.name);
-    const runner = await runners.get(id);
-    await runner.reset(request.principal.actor);
+    await runners.reset(id, request.principal.actor);
     return civilizationSummary(prisma, runners, id);
   });
 }

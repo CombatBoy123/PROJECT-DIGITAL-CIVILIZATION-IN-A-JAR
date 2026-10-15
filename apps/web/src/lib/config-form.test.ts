@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CONFIG_DEFAULTS,
   FIELD_BOUNDS,
+  NUMERIC_FIELDS,
   initialFormValues,
   toRequest,
   validateRequest,
@@ -39,5 +40,14 @@ describe('config form', () => {
       'seed',
     ]);
     expect(errors['config.initialWealth.spread']).toBe('Enter a number.');
+  });
+
+  it('describes initialWealth.meanCents as the mean, as the engine defines it', () => {
+    const field = NUMERIC_FIELDS.find((f) => f.path === 'initialWealth.meanCents');
+    const spread = NUMERIC_FIELDS.find((f) => f.path === 'initialWealth.spread');
+    expect(field?.label).toMatch(/\bmean\b/);
+    expect(`${field?.label} ${field?.hint} ${spread?.hint}`).not.toMatch(
+      /median ×|median adult|wealth median/i,
+    );
   });
 });

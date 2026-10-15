@@ -43,14 +43,14 @@ export const NUMERIC_FIELDS = [
   },
   {
     path: 'initialWealth.meanCents',
-    label: 'Initial wealth median (cents)',
-    hint: 'Approximate median adult endowment, in integer cents.',
+    label: 'Initial wealth mean (cents)',
+    hint: 'Expected (mean) adult endowment in integer cents; elders receive 1.3×. The median is lower, about 85 % of the mean at spread 0.5.',
     schema: shape.initialWealth.unwrap().shape.meanCents,
   },
   {
     path: 'initialWealth.spread',
     label: 'Initial wealth spread',
-    hint: 'Dispersion: each endowment is the median × four uniform factors in [1 − spread, 1 + spread].',
+    hint: 'Dispersion: each endowment is the mean × four uniform factors in [1 − spread, 1 + spread].',
     schema: shape.initialWealth.unwrap().shape.spread,
     step: 0.05,
   },

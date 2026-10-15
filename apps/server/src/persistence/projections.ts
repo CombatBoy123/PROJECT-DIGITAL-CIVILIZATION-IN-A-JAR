@@ -73,56 +73,56 @@ type View = DeepReadonly<WorldState>;
 /** Row content without the civilization id and the updated tick (used for change detection). */
 type Content = unknown[];
 
-interface Entry {
-  key: string;
-  content: Content;
-}
+const DB_ENUM = new Map<string, string>();
 
-function buildingEntries(state: View): Entry[] {
-  return state.buildings.map((b) => ({
-    key: `b:${b.id}`,
-    content: [b.id, toDbEnum(b.kind), b.name, b.x, b.y, b.width, b.height, b.capacity],
-  }));
-}
-
-function householdEntries(state: View): Entry[] {
-  return state.households.map((h) => ({ key: `h:${h.id}`, content: [h.id, h.homeId] }));
-}
-
-function citizenEntries(state: View): Entry[] {
-  return state.citizens.map((c) => ({
-    key: `c:${c.id}`,
-    content: [
-      c.id,
-      c.firstName,
-      c.lastName,
-      c.householdId,
-      c.birthTick,
-      toDbEnum(c.lifeStage),
-      toDbEnum(c.education),
-      c.homeId,
-      c.personality.openness,
-      c.personality.conscientiousness,
-      c.personality.extraversion,
-      c.personality.agreeableness,
-      c.personality.neuroticism,
-      c.balanceCents,
-      c.needs.energy,
-      toDbEnum(c.activity),
-      c.locationId,
-      c.travel ? c.travel.toId : null,
-    ],
-  }));
-}
-
-function skillEntries(state: View): Entry[] {
-  const out: Entry[] = [];
-  for (const c of state.citizens) {
-    for (const skill of SKILLS) {
-      out.push({ key: `s:${c.id}:${skill}`, content: [c.id, toDbEnum(skill), c.skills[skill]] });
-    }
+/** toDbEnum, memoised (enum values are few; this runs several times per row per checkpoint). */
+function dbEnum(value: string): string {
+  let mapped = DB_ENUM.get(value);
+  if (mapped === undefined) {
+    mapped = toDbEnum(value);
+    DB_ENUM.set(value, mapped);
   }
-  return out;
+  return mapped;
+}
+
+function buildingRow(b: View['buildings'][number]): Content {
+  return [b.id, dbEnum(b.kind), b.name, b.x, b.y, b.width, b.height, b.capacity];
+}
+
+function householdRow(h: View['households'][number]): Content {
+  return [h.id, h.homeId];
+}
+
+function citizenRow(c: View['citizens'][number]): Content {
+  return [
+    c.id,
+    c.firstName,
+    c.lastName,
+    c.householdId,
+    c.birthTick,
+    dbEnum(c.lifeStage),
+    dbEnum(c.education),
+    c.homeId,
+    c.personality.openness,
+    c.personality.conscientiousness,
+    c.personality.extraversion,
+    c.personality.agreeableness,
+    c.personality.neuroticism,
+    c.balanceCents,
+    c.needs.energy,
+    dbEnum(c.activity),
+    c.locationId,
+    c.travel ? c.travel.toId : null,
+  ];
+}
+
+const SKILL_DB = SKILLS.map((skill) => toDbEnum(skill));
+
+/** Row values are primitives (numbers, strings, null), so element identity is equality. */
+function sameRow(a: readonly unknown[], b: readonly unknown[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 export interface ProjectionDelta {
@@ -135,6 +135,49 @@ export interface ProjectionDelta {
   removed: { buildings: number[]; households: number[]; citizens: number[] };
 }
 
+/** Last written content per entity id, with the delta generation that last saw it. */
+interface Written<T> {
+  value: T;
+  seen: number;
+}
+
+/**
+ * Rows of one entity kind: returns the changed rows and records removed ids (entities
+ * written before but absent now). Runs on the event loop during checkpoints, so it
+ * compares values directly; no per-row serialisation or key strings.
+ */
+function diffRows<E extends { id: number }>(
+  written: Map<number, Written<Content>>,
+  entities: readonly E[],
+  toRow: (entity: E) => Content,
+  generation: number,
+  removed: number[] | null,
+): Content[] {
+  const rows: Content[] = [];
+  for (const entity of entities) {
+    const row = toRow(entity);
+    const before = written.get(entity.id);
+    if (!before) {
+      written.set(entity.id, { value: row, seen: generation });
+      rows.push(row);
+      continue;
+    }
+    before.seen = generation;
+    if (!sameRow(before.value, row)) {
+      before.value = row;
+      rows.push(row);
+    }
+  }
+  if (written.size !== entities.length) {
+    for (const [id, entry] of written) {
+      if (entry.seen === generation) continue;
+      written.delete(id);
+      removed?.push(id);
+    }
+  }
+  return rows;
+}
+
 /**
  * Tracks what was last written so that each checkpoint only rewrites changed rows.
  * The tracker is updated optimistically when a delta is computed; if the write
@@ -142,12 +185,17 @@ export interface ProjectionDelta {
  * of entities that no longer exist).
  */
 export class ProjectionTracker {
-  private written = new Map<string, string>();
+  private buildings = new Map<number, Written<Content>>();
+  private households = new Map<number, Written<Content>>();
+  private citizens = new Map<number, Written<Content>>();
+  /** Skill levels per citizen, in SKILLS order. */
+  private skills = new Map<number, Written<number[]>>();
+  private generation = 0;
   private primed = false;
 
   /** Forget what was written: the next delta is a full rebuild. */
   invalidate(): void {
-    this.written.clear();
+    this.clear();
     this.primed = false;
   }
 
@@ -160,41 +208,59 @@ export class ProjectionTracker {
   delta(state: View, full = false): ProjectionDelta {
     // An unprimed tracker does not know which rows exist, so it must rebuild everything.
     const isFull = full || !this.primed;
-    if (isFull) this.written.clear();
-    const seen = new Set<string>();
-    const changed = (entries: Entry[]): Content[] => {
-      const rows: Content[] = [];
-      for (const e of entries) {
-        seen.add(e.key);
-        const signature = JSON.stringify(e.content);
-        if (this.written.get(e.key) !== signature) {
-          this.written.set(e.key, signature);
-          rows.push(e.content);
-        }
-      }
-      return rows;
-    };
+    if (isFull) this.clear();
+    const generation = ++this.generation;
+    const removed: ProjectionDelta['removed'] = { buildings: [], households: [], citizens: [] };
     const delta: ProjectionDelta = {
       full: isFull,
-      buildings: changed(buildingEntries(state)),
-      households: changed(householdEntries(state)),
-      citizens: changed(citizenEntries(state)),
-      skills: changed(skillEntries(state)),
-      removed: { buildings: [], households: [], citizens: [] },
+      buildings: diffRows(
+        this.buildings,
+        state.buildings,
+        buildingRow,
+        generation,
+        removed.buildings,
+      ),
+      households: diffRows(
+        this.households,
+        state.households,
+        householdRow,
+        generation,
+        removed.households,
+      ),
+      citizens: diffRows(this.citizens, state.citizens, citizenRow, generation, removed.citizens),
+      skills: this.diffSkills(state, generation),
+      removed,
     };
-    if (!isFull) {
-      for (const key of [...this.written.keys()]) {
-        if (seen.has(key)) continue;
-        this.written.delete(key);
-        const [kind, id] = key.split(':');
-        if (kind === 'b') delta.removed.buildings.push(Number(id));
-        else if (kind === 'h') delta.removed.households.push(Number(id));
-        else if (kind === 'c') delta.removed.citizens.push(Number(id));
-        // Skill rows disappear with their citizen (ON DELETE CASCADE).
-      }
-    }
+    if (isFull) delta.removed = { buildings: [], households: [], citizens: [] };
     this.primed = true;
     return delta;
+  }
+
+  /** Changed skill rows; skill rows of removed citizens disappear with them (ON DELETE CASCADE). */
+  private diffSkills(state: View, generation: number): Content[] {
+    const rows: Content[] = [];
+    for (const c of state.citizens) {
+      const levels = SKILLS.map((skill) => c.skills[skill]);
+      const before = this.skills.get(c.id);
+      if (before) before.seen = generation;
+      else this.skills.set(c.id, { value: levels, seen: generation });
+      for (let i = 0; i < levels.length; i++) {
+        if (before && before.value[i] === levels[i]) continue;
+        rows.push([c.id, SKILL_DB[i], levels[i]]);
+      }
+      if (before) before.value = levels;
+    }
+    if (this.skills.size !== state.citizens.length) {
+      for (const [id, entry] of this.skills) if (entry.seen !== generation) this.skills.delete(id);
+    }
+    return rows;
+  }
+
+  private clear(): void {
+    this.buildings.clear();
+    this.households.clear();
+    this.citizens.clear();
+    this.skills.clear();
   }
 }
 

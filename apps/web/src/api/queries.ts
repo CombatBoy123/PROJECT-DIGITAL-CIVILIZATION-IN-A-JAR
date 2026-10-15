@@ -210,7 +210,11 @@ export function useSetSpeed(id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (ticksPerSecond: number) => api.setSpeed(id, ticksPerSecond),
-    onSuccess: (summary) => mergeSummary(qc, summary),
+    onSuccess: (summary) => {
+      mergeSummary(qc, summary);
+      // Speed changes are audited (simulation.speed_changed).
+      void qc.invalidateQueries({ queryKey: queryKeys.audit(id) });
+    },
   });
 }
 

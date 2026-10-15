@@ -47,6 +47,9 @@ services:
       VIEWER_TOKEN:
       RESUME_RUNNING_ON_START: ${RESUME_RUNNING_ON_START:-false}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Live stream connection caps (total / per client address).
+      STREAM_MAX_CONNECTIONS: ${STREAM_MAX_CONNECTIONS:-256}
+      STREAM_MAX_CONNECTIONS_PER_ADDRESS: ${STREAM_MAX_CONNECTIONS_PER_ADDRESS:-32}
     ports:
       - '${APP_PORT:-3001}:3001'
     # The server writes final checkpoints on SIGTERM and force-exits after 30 s.

@@ -1,7 +1,9 @@
 import {
   CONFIG_SCHEMA_VERSION,
   ENGINE_VERSION,
+  InvariantViolationError,
   STATE_SCHEMA_VERSION,
+  StateRestoreError,
   type MetricSample,
   type SimEvent,
   type SimulationConfig,
@@ -27,6 +29,15 @@ export interface CheckpointWrite {
   metrics: readonly MetricSample[];
   projection: ProjectionDelta;
   status: CivilizationStatus;
+  /** Audit entry of the control action this checkpoint completes (same transaction). */
+  audit?: AuditInput | null;
+}
+
+/** Why the engine halted (see SimulationRunner); recorded as a `simulation.halted` audit entry. */
+export interface HaltInput {
+  reason: string;
+  tick: number;
+  details: Prisma.InputJsonObject;
 }
 
 export interface RewindWrite {
@@ -44,6 +55,34 @@ export interface RewindWrite {
   events: readonly SimEvent[];
   metrics: readonly MetricSample[];
   audit: { action: string; actor: string; details: Prisma.InputJsonValue };
+  /**
+   * A halt of the replaced world that was not recorded yet (it happened while the
+   * replacement was being prepared, or recording it failed). Its audit entry is
+   * written with the rewind so the halt is never lost from the audit log.
+   */
+  halt?: HaltInput | null;
+}
+
+/**
+ * The stored state of a civilization cannot be used: the blob does not decompress,
+ * fails schema or hash verification, violates an invariant, or the checkpoint is
+ * missing. Reset and snapshot restore do not need it and still work (see
+ * RunnerManager). A checkpoint written by another state schema version is not
+ * unloadable in this sense (a matching server reads it): that is a CONFLICT.
+ */
+export class UnloadableStateError extends AppError {
+  constructor(readonly reason: string) {
+    super('INTERNAL', `The stored state could not be loaded: ${reason}`);
+    this.name = 'UnloadableStateError';
+  }
+}
+
+/** A client-safe reason why a stored blob could not be decoded. */
+function decodeFailureReason(err: unknown): string {
+  if (err instanceof StateRestoreError || err instanceof InvariantViolationError)
+    return err.message;
+  if (err instanceof Error && 'errno' in err) return 'the state blob is not valid gzip data';
+  return 'the state blob could not be decoded';
 }
 
 /**
@@ -74,6 +113,16 @@ function chunks<T>(items: readonly T[], size = INSERT_CHUNK): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
+}
+
+function haltAudit(civilizationId: string, halt: HaltInput): AuditInput {
+  return {
+    civilizationId,
+    action: 'simulation.halted',
+    actor: 'engine',
+    tick: halt.tick,
+    details: { reason: halt.reason, ...halt.details },
+  };
 }
 
 function isUniqueViolation(err: unknown): boolean {
@@ -236,29 +285,67 @@ export class CivilizationStore {
         where: { id: input.civilizationId },
         data: { currentTick: input.encoded.tick, status: statusToDb(input.status) },
       });
+      if (input.audit) await this.audit(input.audit, tx);
     }, TX_OPTIONS);
   }
 
-  /** Load the latest durable state of a civilization (hash-verified, invariant-checked). */
+  /**
+   * Load the latest durable state of a civilization (hash-verified, invariant-checked).
+   * Throws NOT_FOUND for unknown ids, CONFLICT for a checkpoint of another state schema
+   * version and UnloadableStateError when the stored state cannot be used; database
+   * errors propagate unchanged.
+   */
   async loadCheckpoint(civilizationId: string, options: SimulationOptions) {
     const civ = await this.prisma.civilization.findUnique({
       where: { id: civilizationId },
       include: { checkpoint: true },
     });
     if (!civ) throw notFound('Civilization');
-    if (!civ.checkpoint) throw new AppError('INTERNAL', 'Civilization has no checkpoint');
+    if (!civ.checkpoint) throw new UnloadableStateError('the civilization has no checkpoint');
     if (civ.checkpoint.stateSchemaVersion !== STATE_SCHEMA_VERSION) {
       throw new AppError(
         'CONFLICT',
         `Checkpoint uses state schema ${civ.checkpoint.stateSchemaVersion}; this server reads ${STATE_SCHEMA_VERSION}`,
       );
     }
-    const simulation = await decodeSimulation(
-      civ.checkpoint.state,
-      civ.checkpoint.stateHash,
-      options,
-    );
+    let simulation: Simulation;
+    try {
+      simulation = await decodeSimulation(civ.checkpoint.state, civ.checkpoint.stateHash, options);
+    } catch (err) {
+      throw new UnloadableStateError(decodeFailureReason(err));
+    }
     return { civ, simulation };
+  }
+
+  /**
+   * Record that the stored state of a civilization cannot be loaded: status HALTED with
+   * the reason (so lists show it), plus a `simulation.state_unloadable` audit entry.
+   * Repeated load failures with the same reason write nothing new. Reset and snapshot
+   * restore clear it like any halt.
+   */
+  async markUnloadable(civilizationId: string, reason: string): Promise<void> {
+    const haltReason = `Stored state could not be loaded: ${reason}. Restore a snapshot or reset.`;
+    await this.prisma.$transaction(async (tx) => {
+      const civ = await tx.civilization.findUnique({
+        where: { id: civilizationId },
+        select: { status: true, haltReason: true, currentTick: true },
+      });
+      if (!civ || (civ.status === 'HALTED' && civ.haltReason === haltReason)) return;
+      await tx.civilization.update({
+        where: { id: civilizationId },
+        data: { status: 'HALTED', haltReason },
+      });
+      await this.audit(
+        {
+          civilizationId,
+          action: 'simulation.state_unloadable',
+          actor: 'system',
+          tick: civ.currentTick,
+          details: { reason },
+        },
+        tx,
+      );
+    });
   }
 
   /**
@@ -289,8 +376,14 @@ export class CivilizationStore {
       await this.upsertCheckpoint(tx, civilizationId, encoded, gz);
       await tx.civilization.update({
         where: { id: civilizationId },
-        data: { currentTick: encoded.tick, status: 'PAUSED', haltReason: null },
+        data: {
+          currentTick: encoded.tick,
+          status: 'PAUSED',
+          haltReason: null,
+          timeline: { increment: 1 },
+        },
       });
+      if (input.halt) await this.audit(haltAudit(civilizationId, input.halt), tx);
       await this.audit(
         {
           civilizationId,
@@ -305,27 +398,14 @@ export class CivilizationStore {
   }
 
   /** Record an invariant halt: status, reason and audit entry in one transaction. */
-  async recordHalt(input: {
-    civilizationId: string;
-    reason: string;
-    tick: number;
-    details: Prisma.InputJsonValue;
-  }): Promise<void> {
+  async recordHalt(input: HaltInput & { civilizationId: string }): Promise<void> {
+    const { civilizationId, ...halt } = input;
     await this.prisma.$transaction(async (tx) => {
       await tx.civilization.update({
-        where: { id: input.civilizationId },
-        data: { status: 'HALTED', haltReason: input.reason },
+        where: { id: civilizationId },
+        data: { status: 'HALTED', haltReason: halt.reason },
       });
-      await this.audit(
-        {
-          civilizationId: input.civilizationId,
-          action: 'simulation.halted',
-          actor: 'engine',
-          tick: input.tick,
-          details: input.details,
-        },
-        tx,
-      );
+      await this.audit(haltAudit(civilizationId, halt), tx);
     });
   }
 
@@ -394,17 +474,32 @@ export class CivilizationStore {
     return { simulation, name: snapshot.name, tick: snapshot.tick };
   }
 
+  /**
+   * Change runtime fields of a civilization. With `audit`, the change and its audit
+   * entry commit in one transaction, so a control action is either recorded and in
+   * effect, or neither.
+   */
   async updateRuntime(
     civilizationId: string,
     data: { status?: CivilizationStatus; speed?: number; haltReason?: string | null },
+    audit?: AuditInput | null,
   ): Promise<void> {
-    await this.prisma.civilization.update({
-      where: { id: civilizationId },
-      data: {
-        ...(data.status ? { status: statusToDb(data.status) } : {}),
-        ...(data.speed !== undefined ? { speed: data.speed } : {}),
-        ...(data.haltReason !== undefined ? { haltReason: data.haltReason } : {}),
-      },
+    const update = (tx: Tx | PrismaClient) =>
+      tx.civilization.update({
+        where: { id: civilizationId },
+        data: {
+          ...(data.status ? { status: statusToDb(data.status) } : {}),
+          ...(data.speed !== undefined ? { speed: data.speed } : {}),
+          ...(data.haltReason !== undefined ? { haltReason: data.haltReason } : {}),
+        },
+      });
+    if (!audit) {
+      await update(this.prisma);
+      return;
+    }
+    await this.prisma.$transaction(async (tx) => {
+      await update(tx);
+      await this.audit(audit, tx);
     });
   }
 

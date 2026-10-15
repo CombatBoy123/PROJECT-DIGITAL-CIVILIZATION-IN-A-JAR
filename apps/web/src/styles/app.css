@@ -486,6 +486,13 @@ select {
   border-color: rgba(165, 151, 245, 0.35);
   background: var(--info-soft);
 }
+.access-note {
+  margin: 0;
+  padding: 2px 0 2px var(--sp-2);
+  border-left: 2px solid var(--accent);
+  color: var(--text-2);
+  font-size: var(--fs-s);
+}
 .alert-code {
   color: var(--danger);
   font-weight: 600;
@@ -677,6 +684,9 @@ select {
 }
 
 .table-scroll {
+  /* Containing block for absolutely positioned content (e.g. .visually-hidden labels in
+     header cells), so it is clipped here instead of widening the page on narrow screens. */
+  position: relative;
   overflow-x: auto;
 }
 .table {
@@ -1121,6 +1131,10 @@ select {
   grid-area: sub;
   color: var(--text-muted);
   font-size: var(--fs-xs);
+}
+/* --text-muted on the accent tint is below 4.5:1; the selected row uses --text-2. */
+.entity-row[aria-current='true'] .entity-sub {
+  color: var(--text-2);
 }
 .entity-value {
   grid-area: value;

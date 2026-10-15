@@ -15,6 +15,7 @@ import type {
   SnapshotDto,
 } from '@civ/shared';
 import { Prisma, type PrismaClient, type Snapshot } from '@prisma/client';
+import { AppError } from '../http/errors.js';
 import { fromDbEnum, toNumber } from './mappers.js';
 
 /*
@@ -147,16 +148,60 @@ export async function listEvents(
 export const EVENT_EXPORT_PAGE = 2000;
 
 /**
+ * Options of the paged export iterators. Each page is a separate query, so a rewind
+ * (restore or reset) committed between two pages would delete or replace rows the
+ * export has not read yet. `verify` runs after each page is read and before it is
+ * yielded; it throws when that happened (see `timelineGuard`), so an export either
+ * contains one consistent timeline or fails — it never ends early looking complete.
+ */
+export interface ExportPaging {
+  pageSize?: number;
+  verify?: () => Promise<void>;
+}
+
+/**
+ * A `verify` for ExportPaging: throws CONFLICT once the civilization's timeline
+ * generation differs from `timeline` (the value read when the export started), and
+ * NOT_FOUND once it was deleted. A rewind increments the generation in its own
+ * transaction, so a check that runs after a page was read sees every rewind that
+ * could have affected that page.
+ */
+export function timelineGuard(
+  prisma: PrismaClient,
+  civilizationId: string,
+  timeline: number,
+): () => Promise<void> {
+  return async () => {
+    const row = await prisma.civilization.findUnique({
+      where: { id: civilizationId },
+      select: { timeline: true },
+    });
+    if (!row) {
+      throw new AppError('NOT_FOUND', 'The civilization was deleted while the export was running');
+    }
+    if (row.timeline !== timeline) {
+      throw new AppError(
+        'CONFLICT',
+        'The civilization was rewound (snapshot restore or reset) while the export was running; the export was aborted',
+      );
+    }
+  };
+}
+
+/**
  * All events matching `filter` in ascending seq, page by page. The export is cut at
  * the durable boundary observed when it starts (`belowSeq`), so events committed
- * while the export streams are not partially included.
+ * while the export streams are not partially included; `paging.verify` detects
+ * rewinds (which delete rows below the boundary).
  */
 export async function* iterateEvents(
   prisma: PrismaClient,
   civilizationId: string,
   filter: EventFilter,
   belowSeq: number,
+  paging: ExportPaging = {},
 ): AsyncGenerator<EventDto[]> {
+  const pageSize = paging.pageSize ?? EVENT_EXPORT_PAGE;
   let after = 0;
   for (;;) {
     const conds = [
@@ -169,12 +214,13 @@ export async function* iterateEvents(
       FROM "simulation_event" e
       WHERE ${Prisma.join(conds, ' AND ')}
       ORDER BY e."seq" ASC
-      LIMIT ${EVENT_EXPORT_PAGE}::int`;
-    if (rows.length === 0) return;
+      LIMIT ${pageSize}::int`;
     const items = await toEventDtos(prisma, civilizationId, rows);
+    await paging.verify?.();
+    if (items.length === 0) return;
     yield items;
     const last = items[items.length - 1];
-    if (!last || rows.length < EVENT_EXPORT_PAGE) return;
+    if (!last || rows.length < pageSize) return;
     after = last.seq;
   }
 }
@@ -291,13 +337,18 @@ export async function metricSeries(
 /** Rows per page when streaming raw metric samples for export. */
 export const METRIC_EXPORT_PAGE = 5000;
 
-/** Raw samples in ascending tick order, page by page (up to `throughTick`, inclusive). */
+/**
+ * Raw samples in ascending tick order, page by page (up to `throughTick`, inclusive);
+ * `paging.verify` detects rewinds, as for iterateEvents.
+ */
 export async function* iterateMetricSamples(
   prisma: PrismaClient,
   civilizationId: string,
   keys: readonly MetricKey[],
   range: { fromTick: number; throughTick: number },
+  paging: ExportPaging = {},
 ): AsyncGenerator<number[][]> {
+  const pageSize = paging.pageSize ?? METRIC_EXPORT_PAGE;
   let from = range.fromTick;
   for (;;) {
     const rows = await prisma.$queryRaw<MetricRow[]>`
@@ -306,11 +357,12 @@ export async function* iterateMetricSamples(
       WHERE m."civilization_id" = ${civilizationId}::uuid
         AND m."tick" >= ${from}::int AND m."tick" <= ${range.throughTick}::int
       ORDER BY m."tick"
-      LIMIT ${METRIC_EXPORT_PAGE}::int`;
+      LIMIT ${pageSize}::int`;
+    await paging.verify?.();
     if (rows.length === 0) return;
     yield rows.map((r) => [r.tick, ...(r.v as number[])]);
     const last = rows[rows.length - 1];
-    if (!last || rows.length < METRIC_EXPORT_PAGE) return;
+    if (!last || rows.length < pageSize) return;
     from = last.tick + 1;
   }
 }

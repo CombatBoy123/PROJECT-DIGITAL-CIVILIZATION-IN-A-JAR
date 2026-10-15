@@ -6,7 +6,9 @@ import { buildingRect, rectContains } from './geometry';
  * Picking (pure; no PixiJS). All coordinates are world pixels; the tolerance is
  * given in screen pixels and converted with the current zoom, so targets stay easy
  * to hit at every zoom level. Citizens win over buildings because they are drawn
- * on top of them.
+ * on top of them, but inside a building's footprint only a direct hit on a dot
+ * counts: occupants' dots (plus slack) would otherwise cover most of a busy
+ * building at overview zoom and make the building itself impossible to pick.
  */
 
 /** A citizen's rendered position. `visible: false` entries are ignored. */
@@ -81,7 +83,10 @@ export function hitTestBuildings(
   return best;
 }
 
-/** Citizen first, then building; null for empty ground. */
+/**
+ * Citizen first, then building; null for empty ground. Inside a footprint a citizen
+ * needs a direct hit (no tolerance); elsewhere (roads, open ground) the tolerance applies.
+ */
 export function hitTest(
   citizens: Iterable<CitizenPoint>,
   buildings: readonly Pick<Building, 'id' | 'x' | 'y' | 'width' | 'height'>[],
@@ -89,8 +94,14 @@ export function hitTest(
   wy: number,
   options: HitTestOptions,
 ): Selection | null {
-  const citizen = hitTestCitizens(citizens, wx, wy, options);
+  const inside = hitTestBuildings(buildings, wx, wy, { zoom: options.zoom, tolerancePx: 0 });
+  const citizen = hitTestCitizens(
+    citizens,
+    wx,
+    wy,
+    inside !== null ? { ...options, tolerancePx: 0 } : options,
+  );
   if (citizen !== null) return { kind: 'citizen', id: citizen };
-  const building = hitTestBuildings(buildings, wx, wy, options);
+  const building = inside ?? hitTestBuildings(buildings, wx, wy, options);
   return building !== null ? { kind: 'building', id: building } : null;
 }

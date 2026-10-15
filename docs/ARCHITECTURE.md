@@ -32,24 +32,26 @@ project was initialised from scratch. No existing code had to be preserved.
 └───────────────▲──────────────────────────────▲──────────────────┘
                 │ REST (JSON, Zod-validated)   │ WebSocket (status, delta frames, live events)
 ┌───────────────┴──────────────────────────────┴──────────────────┐
-│  apps/server  (Fastify)                                          │
-│   ├─ routes/        validation, auth, consistent errors          │
-│   ├─ runner/        RunnerManager → SimulationRunner per civ     │
-│   │                  time-sliced tick loop, command queue        │
-│   ├─ persistence/   CheckpointWriter (atomic flush), projections │
-│   └─ ws/            stream hub with backpressure                 │
-│                      │ calls                                      │
-│   ┌──────────────────▼─────────────────────────┐                 │
-│   │ packages/sim-core  (pure TypeScript)        │                 │
-│   │  rng · clock · worldgen · systems · events  │                 │
-│   │  invariants · metrics · serialization/hash │                 │
-│   └─────────────────────────────────────────────┘                 │
-└───────────────┬──────────────────────────────────────────────────┘
+│  apps/server  (Fastify)                                         │
+│   ├─ routes/        validation, auth, consistent errors         │
+│   ├─ runner/        RunnerManager → SimulationRunner per civ    │
+│   │                  time-sliced tick loop, command queue       │
+│   ├─ persistence/   CivilizationStore (transactions),           │
+│   │                  projections, history queries               │
+│   └─ ws/            stream hub with backpressure                │
+│                      │ calls                                    │
+│   ┌──────────────────▼─────────────────────────┐                │
+│   │ packages/sim-core  (pure TypeScript)       │                │
+│   │  rng · clock · worldgen · systems · events │                │
+│   │  invariants · metrics · serialization/hash │                │
+│   └────────────────────────────────────────────┘                │
+└───────────────┬─────────────────────────────────────────────────┘
                 │ Prisma
-┌───────────────▼──────────────────────────────────────────────────┐
-│ PostgreSQL: civilizations, configs, checkpoints, snapshots,      │
-│ projections (citizens, buildings, skills), events, metrics, audit│
-└───────────────────────────────────────────────────────────────────┘
+┌───────────────▼─────────────────────────────────────────────────┐
+│ PostgreSQL: civilizations, configs, checkpoints, snapshots,     │
+│ projections (citizens, buildings, skills), events, metrics,     │
+│ audit log                                                       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 `packages/shared` holds the HTTP/WebSocket contract (Zod schemas and DTO
@@ -66,11 +68,12 @@ types) used by both the server and the web client.
 │   │   │   ├── config/         environment parsing (Zod)
 │   │   │   ├── db/             Prisma client, raw SQL helpers
 │   │   │   ├── auth/           token auth, roles
-│   │   │   ├── runner/         SimulationRunner, RunnerManager
-│   │   │   ├── persistence/    checkpoint writer, projections, history queries
+│   │   │   ├── runner/         SimulationRunner, RunnerManager, world replacement (rewinds)
+│   │   │   ├── persistence/    CivilizationStore (all transactional writes), state codec,
+│   │   │   │                   projection diffing, world and history queries
 │   │   │   ├── routes/         REST endpoints
 │   │   │   ├── ws/             WebSocket stream hub
-│   │   │   └── http/           error types, validation helpers
+│   │   │   └── http/           error types, client-safe failure reports
 │   │   └── test/               integration tests (real PostgreSQL)
 │   └── web/                    React + Vite + PixiJS observatory
 │       ├── src/
@@ -178,15 +181,28 @@ impossible state. See §8 for the list.
 ### 6.1 Runners and the tick loop
 
 `RunnerManager` lazily loads a civilization (from its latest checkpoint) into a
-`SimulationRunner`, with single-flight loading. A runner:
+`SimulationRunner`, with single-flight loading. A paused runner that nobody streams and
+nobody has used for 15 minutes (`DEFAULT_IDLE_EVICT_MS`) is unloaded again, but only
+when it is fully durable (no uncommitted ticks or halt, and the stored status equals
+the in-memory one); this is why civilization summaries carry `loaded`. A runner:
 
-- runs ticks in **time slices** (≤ ~12 ms per slice, then yields to the event
-  loop), so HTTP handlers stay responsive and never execute ticks themselves;
+- runs ticks in **time slices**: after each tick it checks whether the slice budget
+  (`SLICE_BUDGET_MS`, 12 ms) is used up and, if so, yields to the event loop, so HTTP
+  handlers never execute ticks themselves and stay responsive at the populations of the
+  demos (100–1,000 citizens). Because the check runs after a tick, a slice can overrun
+  by one tick: at the maximum population of 5,000 a single tick can take 15–40 ms;
 - paces itself to the requested speed (ticks per real second, or "max");
-- serialises all control operations (start, pause, step, snapshot, restore,
-  reset) through a per-runner async queue so they cannot interleave;
-- buffers events and metric samples in memory and flushes them through the
-  `CheckpointWriter`.
+- serialises all control operations (start, pause, step, speed, snapshot, restore,
+  reset) through a per-runner async queue (`runner/serial-queue.ts`) so they cannot
+  interleave;
+- buffers events and metric samples in memory and writes them with its state in
+  `SimulationRunner.checkpoint()`, which calls `CivilizationStore.writeCheckpoint`
+  (`persistence/store.ts`). The projection diff (`persistence/projections.ts`) compares
+  the rows it last wrote with the current state per entity id. Measured at 5,000
+  citizens on a shared machine, the diff takes about 5–25 ms and `captureState`
+  (canonical serialisation plus hash) about 40–120 ms, so **a checkpoint at the maximum
+  population blocks the event loop for roughly 50–150 ms** every
+  `CHECKPOINT_INTERVAL_MS`. At 100–1,000 citizens it is a few milliseconds.
 
 ### 6.2 Atomic checkpoints
 
@@ -195,12 +211,23 @@ A checkpoint captures, at one tick and inside **one database transaction**:
 1. buffered events (+ their entity references) and metric samples,
 2. the gzip-compressed canonical state blob and its hash,
 3. changed rows of the normalised projections (citizens, skills, buildings),
-4. `civilization.current_tick`.
+4. `civilization.current_tick` and `status`, plus the audit entry of the control
+   action (pause, step) that triggered the checkpoint, if any.
 
 Checkpoints run every `CHECKPOINT_INTERVAL_MS` while running and immediately on
-pause, snapshot, restore and shutdown. Only one flush is in flight; if buffers
+pause, step, snapshot and shutdown; a rewind (restore, reset) writes its own
+checkpoint in its transaction. Only one flush is in flight; if buffers
 exceed their bounds the loop waits for the flush (**backpressure**) instead of
-growing memory. Because events are only committed together with the state that
+growing memory.
+
+**Control actions are atomic with their audit entry.** start, pause, speed changes and
+steps write the state change (a checkpoint, or a status-only update when nothing is
+uncommitted) and the audit entry in one transaction, and change the in-memory runner
+only after that commit. If the write fails the action returns `500` and nothing
+changes. Pausing therefore always makes `PAUSED` durable, even when no tick is
+uncommitted.
+
+Because events are only committed together with the state that
 produced them, a crash can lose at most the uncommitted ticks since the last
 checkpoint and can never leave events without their state (or vice versa).
 Recovery loads the checkpoint; because the engine is deterministic, the lost
@@ -218,25 +245,58 @@ ticks are re-simulated identically when the civilization is resumed.
 - **Live view**: the WebSocket stream sends a keyframe on connect, then delta
   frames (only citizens whose position/activity changed) at most `FRAME_RATE`
   times per second, independent of the simulation speed. Slow clients skip
-  deltas and receive a fresh keyframe once their socket drains.
+  deltas and receive a fresh keyframe once their socket drains; a client whose
+  buffer stays congested for 10 s is disconnected. Live connections are capped in
+  total and per client address (`STREAM_MAX_CONNECTIONS`,
+  `STREAM_MAX_CONNECTIONS_PER_ADDRESS`).
 
 ### 6.4 Security
 
-- `AUTH_MODE=disabled` is accepted only when the server binds to a loopback
-  address (trusted local development). Otherwise `AUTH_MODE=token` is required:
-  `OPERATOR_TOKEN` authorises mutations; an optional `VIEWER_TOKEN` gates reads.
-- Destructive actions (reset, restore, delete) additionally require the
+Source: `apps/server/src/auth/auth.ts`.
+
+- **Two modes.** `AUTH_MODE=disabled` is accepted only when the server binds to a
+  loopback address (trusted local development). Otherwise `AUTH_MODE=token` is
+  required: `OPERATOR_TOKEN` authorises mutations; an optional `VIEWER_TOKEN` gates
+  reads. Tokens are compared in constant time.
+- **Authorisation follows the matched route, not the URL text.** Every route in
+  `API_ROUTES` (`packages/shared/src/routes.ts`) has an `auth` level (`public`, `read`,
+  `operate`). The `onRequest` hook looks up the route pattern Fastify actually matched
+  (`request.routeOptions.url`; `HEAD` uses the `GET` entry), so percent-encoded paths
+  (`/%61pi/…`) and absolute-form request targets get exactly the checks of the
+  canonical path. A matched route under `/api` that is missing from `API_ROUTES`
+  requires the operator (fail closed); unmatched requests only reach the 404 handler.
+- **Tokens travel in `Authorization: Bearer`.** `?token=` is read only on WebSocket
+  upgrade `GET`s of `/api/civilizations/:id/stream` (browsers cannot set headers
+  there) and is redacted from logs; on every other request a query token is ignored.
+- **Disabled mode accepts only local requests (DNS rebinding).** Binding to loopback
+  keeps other machines out, but a web page in the developer's browser could rebind its
+  own host name to `127.0.0.1` and send same-origin requests. So in disabled mode every
+  request — reads, mutations, CORS preflights and WebSocket upgrades — must carry a
+  `Host` header naming a loopback host (`localhost`, `*.localhost`, `127.0.0.0/8` or
+  `[::1]`, any port, strict syntax), and a present `Origin` must be a loopback
+  `http(s)` origin or listed in `CORS_ORIGINS` (the opaque origin `null` is rejected);
+  otherwise `403 FORBIDDEN`. The remaining trust assumption: any process on the same
+  machine can operate a server in disabled mode.
+- **Destructive actions** (reset, restore, delete) additionally require the
   civilization's exact name in the request body (`confirm`), checked on the
   server.
-- All input is validated with Zod; state blobs read from the database are
+- **Validation.** All input is validated with Zod (strict schemas; integer query
+  parameters accept only decimal digits). Search terms are matched literally (`%`, `_`
+  and `\` are escaped before `ILIKE`). State blobs read from the database are
   re-validated and hash-checked before use. Event payloads are data only — no
   code paths evaluate user-supplied content.
+- **Client-safe errors.** Persistence failures are logged in full with a random
+  reference; clients (`lastError`, stream status, `500` bodies) only see
+  `<what> (<kind>; ref <8 hex>)`, never driver messages or server paths
+  (`apps/server/src/http/failure.ts`).
+- **Resource limits.** Request bodies ≤ 256 KiB, steps per request ≤ 1,000, list
+  pages bounded, live stream connections capped in total and per address.
 
 ## 7. Data model (Phase 1)
 
 | Table               | Purpose                                                            | Key / indexes                                                          |
 | ------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- |
-| `civilization`      | experiment run: name, seed, status, speed, current tick            | PK `id` (uuid); unique `name`                                          |
+| `civilization`      | experiment run: name, seed, status, speed, current tick, timeline  | PK `id` (uuid); unique `name`                                          |
 | `simulation_config` | validated config parameters + schema version (1:1)                 | PK `civilization_id`                                                   |
 | `world_checkpoint`  | latest durable state blob (gzip), hash, tick                       | PK `civilization_id`                                                   |
 | `snapshot`          | named immutable state blobs                                        | PK `id`; unique (`civilization_id`, `name`)                            |
@@ -259,8 +319,8 @@ Full column-level documentation lives in [DATABASE.md](DATABASE.md).
 
 ## 8. Simulation invariants
 
-Checked by `checkInvariants` (every tick by default, configurable for
-benchmarks) and by tests:
+Checked by `checkInvariants` (after genesis, after every tick and on every restore by
+default; `INVARIANT_CHECKS=off` disables them for benchmarks) and by tests:
 
 1. **Clock** — `tick` is a non-negative integer and advances by exactly one per step
    (by construction in `step()`); no activity starts in the future.
@@ -269,34 +329,42 @@ benchmarks) and by tests:
 4. **Money conservation** — Σ balances = Σ issued − Σ destroyed (ledger totals).
 5. **Housing** — each citizen's home exists and is residential; occupants ≤ capacity.
 6. **Location** — a citizen is either at an existing building (no travel) or
-   travelling (no location) with `departTick < arriveTick`, `departTick ≤ tick`.
+   travelling (no location) with `departTick ≤ tick < arriveTick`, on a home ↔ venue
+   trip whose duration equals the travel time of its route.
 7. **Bounded needs** — needs are finite and within [0, 100].
 8. **Life stage** — stored life stage matches the stage implied by age.
 9. **Events** — event `seq` strictly increases; events carry the tick they were emitted in.
 10. **Snapshots** — a restored snapshot's canonical hash equals the stored hash
     (enforced by `deserializeState`, which also validates the schema).
-11. **Map** — every building lies inside its block and every door on a road.
+11. **Map** — the map is exactly a grid of blocks separated by roads; every building
+    lies inside its block without overlapping another, and every door is on a road.
 12. **Venue capacity** — present plus incoming visitors never exceed a venue's capacity.
+13. **Environment** — the temperature follows the daily mean and the hourly profile;
+    the daily mean stays within its bounded deviation from the seasonal baseline (and
+    equals it, with clear weather, when stochastic weather is off).
 
-Items 1–9 and 11–12 are the codes reported by `checkInvariants` / `checkEventSequence`
-(`CLOCK`, `IDENTITY`, `NEGATIVE_BALANCE`, `MONEY_CONSERVATION`, `HOUSING`, `LOCATION`,
-`NEEDS_BOUNDS`, `LIFE_STAGE`, `EVENT_SEQUENCE`, `MAP`, `VENUE_CAPACITY`); see
+Items 1–9 and 11–13 are the twelve codes reported by `checkInvariants` /
+`checkEventSequence` (`CLOCK`, `IDENTITY`, `NEGATIVE_BALANCE`, `MONEY_CONSERVATION`,
+`HOUSING`, `LOCATION`, `NEEDS_BOUNDS`, `LIFE_STAGE`, `EVENT_SEQUENCE`, `MAP`,
+`VENUE_CAPACITY`, `ENVIRONMENT`); item 10 is enforced by `deserializeState`. See
 [SIMULATION_RULES.md](SIMULATION_RULES.md#invariants) for the exact conditions.
+With `INVARIANT_CHECKS=off` (benchmarks only) none of the twelve coded checks run,
+not even at genesis or on restore; the schema and hash checks of item 10 still do.
 
 Planned with Phase 2+: inventories never negative, sales ≤ owned inventory,
 production consumes recipe inputs, every transfer has matching debit and credit.
 
 ## 9. Phased implementation plan
 
-| Phase | Scope                                                                                                                                                        | Status      |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- |
-| 1     | Monorepo, schema + migrations, clock, seeded RNG, world generation, persistent citizens, repeatable ticks, checkpoints/snapshots, minimal observatory, tests | in progress |
-| 2     | Resources, recipes, businesses, employment, wages, inventory, transactions, order matching and price formation; accounting invariants                        | planned     |
-| 3     | Needs (hunger, health, happiness, security), utility-based decisions with recorded alternatives, consumption, goals, relationships, memories                 | planned     |
-| 4     | Policy engine (taxes, minimum wage, UBI, rent control, benefits, trade, subsidies, public services), disasters and shocks, laboratory UI                     | planned     |
-| 5     | Full observatory: overlays, filters, minimap, inspectors for all entities, dashboard with definitions, timeline linking metrics to events                    | planned     |
-| 6     | Experiments: duplication/branching, comparison of runs, repeated runs with different seeds, exports (JSON/CSV)                                               | planned     |
-| 7     | Hardening: benchmarks at 1,000+ citizens, worker-thread runners if needed, Docker deployment, CI polish, documentation pass                                  | planned     |
+| Phase | Scope                                                                                                                                                                                                                                        | Status      |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| 1     | Monorepo, schema + migrations, clock, seeded RNG, world generation, persistent citizens, repeatable ticks, checkpoints/snapshots, observatory with metrics dashboard and definitions, config/metrics/events exports, Docker image, CI, tests | in progress |
+| 2     | Resources, recipes, businesses, employment, wages, inventory, transactions, order matching and price formation; accounting invariants                                                                                                        | planned     |
+| 3     | Needs (hunger, health, happiness, security), utility-based decisions with recorded alternatives, consumption, goals, relationships, memories                                                                                                 | planned     |
+| 4     | Policy engine (taxes, minimum wage, UBI, rent control, benefits, trade, subsidies, public services), disasters and shocks, laboratory UI                                                                                                     | planned     |
+| 5     | Full observatory: overlays, filters, inspectors for every new entity type, timeline linking metrics to events                                                                                                                                | planned     |
+| 6     | Experiments: duplication/branching, comparison of runs, repeated runs with different seeds, richer exports                                                                                                                                   | planned     |
+| 7     | Hardening: benchmarks at 1,000+ citizens including persistence, worker-thread runners if needed, deployment polish, retention, documentation pass                                                                                            | planned     |
 
 Each phase ends with a runnable application, passing tests and updated docs.
 See [ROADMAP.md](ROADMAP.md) for the detailed checklist.

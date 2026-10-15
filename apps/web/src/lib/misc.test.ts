@@ -38,6 +38,29 @@ describe('keyboard shortcuts', () => {
     expect(shortcutFor(key('.', button))).toBe('step');
     expect(shortcutFor(key(' ', { tagName: 'DIV', getAttribute: () => 'tab' }))).toBeNull();
   });
+
+  it('leaves space to focused scroll containers so it scrolls them', () => {
+    const panel = {
+      tagName: 'DIV',
+      getAttribute: (n: string) => (n === 'role' ? 'tabpanel' : null),
+    };
+    expect(shortcutFor(key(' ', panel))).toBeNull();
+    expect(shortcutFor(key('.', panel))).toBe('step');
+    const overflowing = { tagName: 'DIV', scrollHeight: 1832, clientHeight: 254 };
+    expect(shortcutFor(key(' ', overflowing))).toBeNull();
+    // Nothing focused (body), a non-scrolling element and the map still toggle playback.
+    expect(shortcutFor(key(' ', { tagName: 'BODY', scrollHeight: 2000, clientHeight: 900 }))).toBe(
+      'togglePlay',
+    );
+    expect(shortcutFor(key(' ', { tagName: 'DIV', scrollHeight: 100, clientHeight: 100 }))).toBe(
+      'togglePlay',
+    );
+    const map = {
+      tagName: 'DIV',
+      getAttribute: (n: string) => (n === 'role' ? 'application' : null),
+    };
+    expect(shortcutFor(key(' ', map))).toBe('togglePlay');
+  });
 });
 
 describe('selection in the URL', () => {

@@ -49,7 +49,9 @@ Source: `src/time/clock.ts`.
   dayOfSeason = dayOfYear mod daysPerSeason        (0-based)
   ```
 
-- **Night** is 22:00–05:59 (`isNight(hour) = hour ≥ 22 ∨ hour < 6`).
+- **Night** is 22:00–05:59 (`isNight(hour) = hour ≥ 22 ∨ hour < 6`; `NIGHT_START_HOUR = 22`,
+  `NIGHT_END_HOUR = 6`). `hoursUntilNight(hour)` is `22 − hour` in daytime and 0 at night: the
+  whole hours from the start of `hour` until the night begins.
 - Display format (`formatCalendar`): `Y1 spring D3 07:00` (day of season 1-based).
 - Simulation time is unrelated to wall-clock time. The server's runner decides how
   many ticks to execute per real second (the civilization's _speed_); the speed has
@@ -284,7 +286,11 @@ The venue supply `⌈0.35·population / 35⌉` sizes venues so that 35 % of the 
 - **Houses**: residential blocks are filled from the map centre outwards, four 3 × 3 lots per
   block (top-left, top-right, bottom-left, bottom-right), until `houseCount` houses
   exist. A top lot's door is on the road above the block, a bottom lot's door on the
-  road below; houses are named after the door, e.g. "12 Willow Street".
+  road below. Houses are named after the door: the house number is `2·doorX` for a top
+  lot and `2·doorX + 1` for a bottom lot, followed by the street of the door's road, e.g.
+  "12 Willow Street". The top lot of one block and the bottom lot of the block above it
+  share the same door tile (the road tile in front of both entrances); the side of the
+  road sets the parity of their numbers, so every building name is unique.
 - **Housing** (stream `worldgen, housing`): the houses are shuffled (Fisher–Yates) and
   household _i_ moves into the _i_-th shuffled house. An occupied house gets capacity
   `min(6, max(members, int(2, 5)))`; a vacant house `int(2, 5)`.
@@ -385,6 +391,10 @@ average of the 24 hourly values.
 **Genesis**: weather `clear`; the daily mean of day 1 is drawn from the spring baseline
 with stream `weather, 0` (or is exactly 12 °C without stochastic weather).
 
+**Bounds** (checked by the `ENVIRONMENT` [invariant](#invariants)): because `normal` is
+bounded to μ ± 6σ, the daily mean never deviates from the seasonal baseline by more than
+`MAX_DAILY_TEMP_DEVIATION_C = 6 · 2.5 = 15 °C`.
+
 **Effects in Phase 1**: weather scales the probability of going out and a storm sends
 venue visitors home (see [routine](#daily-routine-and-movement)). Temperature is
 recorded and shown but influences nothing yet.
@@ -436,6 +446,7 @@ that the Phase 3 utility-based decision system will replace.
 | `wakeConscientiousness` | 0.6                                                                                                                                                                                   |
 | `sleepEnergy`           | 20                                                                                                                                                                                    |
 | `outingMinEnergy`       | 40                                                                                                                                                                                    |
+| `outingMinStayHours`    | 1 (hours at the venue an outing must leave room for; the arrival hour counts)                                                                                                         |
 | `leaveVenueEnergy`      | 30                                                                                                                                                                                    |
 | `outingBaseByHour`      | 0 for hours 0–7 and 21–23; 08:00 0.04, 09:00 0.06, 10:00 0.08, 11:00 0.08, 12:00 0.07, 13:00 0.07, 14:00 0.08, 15:00 0.09, 16:00 0.10, 17:00 0.10, 18:00 0.08, 19:00 0.05, 20:00 0.02 |
 | `weatherOutingFactor`   | clear 1, cloudy 0.8, rain 0.35, storm 0                                                                                                                                               |
@@ -470,10 +481,18 @@ citizen and tick):
    `p_out = outingBaseByHour[hour] · (0.5 + extraversion) · weatherOutingFactor[weather]`
 
    (at most 0.10 · 1.5 · 1 = 0.15 per hour). If the draw succeeds, a venue is chosen
-   (below); if no venue has room, the citizen stays home.
+   (below); if no venue has room or no outing [fits](#venue-choice), the citizen stays
+   home.
 
-4. **At a venue**: must leave if it is night, `energy < 30` or the weather is a storm;
-   otherwise leaves with probability
+4. **At a venue**: must leave if it is night, `energy < 30`, the weather is a storm, or
+   staying one more hour would not leave time and energy to get home, i.e. (with
+   `T_home = travelTicks(venue → home)`)
+
+   `1 + T_home > hoursUntilNight(hour)` (home after 22:00), or
+   `energy − d(leisure) − T_home · d(traveling) < 20` (home below `sleepEnergy`),
+
+   with the drains `d` of [energy](#needs-energy) (2.5 and 3, × 1.25 for elders).
+   Otherwise leaves with probability
 
    `p_leave = 0.15 + 0.2 · (1 − extraversion) + (0.2 if hoursThere ≥ 4 else 0)`,
    `hoursThere = tick − activitySince` (hours since arrival). Leaving starts a trip
@@ -486,6 +505,7 @@ proportional to its weight:
 
 ```
 w(v) = 0                                         if load(v) ≥ capacity(v)
+w(v) = 0                                         if the outing to v does not fit (below)
 w(v) = preference(v) / (1 + routeLength(home → v) / 20)    otherwise
 preference(park)  = 0.5 + openness
 preference(plaza) = 1.5 − openness
@@ -493,6 +513,26 @@ preference(plaza) = 1.5 − openness
 
 Open-minded citizens prefer parks, conventional ones plazas, and nearby venues are
 preferred (a venue 20 tiles away has half the weight of one at the door).
+
+**An outing fits** (`outingFits`) when, with `T = travelTicks(home → v)` and
+`stay = outingMinStayHours = 1`, both
+
+```
+2·T + stay ≤ hoursUntilNight(hour)                                  (home by 22:00)
+energy − 2·T·d(traveling) − stay·d(leisure) ≥ sleepEnergy (20)      (energy to spare)
+```
+
+hold, with `d(traveling) = 3` and `d(leisure) = 2.5` (× 1.25 for elders). Consequences: no
+outing can start at 20:00 or later, only one-tick trips fit at 19:00, and in slow or large
+worlds distant venues are never chosen (at `walkTilesPerTick = 4` with 5,000 citizens
+almost nobody goes out). When no venue has a positive weight, no venue draw is made;
+because every citizen has its own stream per tick, this never shifts another citizen's
+random numbers.
+
+Together with the leaving rule above, every routine trip ends by 22:00: nobody is at a
+venue or travelling during the night (22:00–05:59), and travelling citizens never fall
+below energy 20. The only exception is a state restored in the middle of a trip that was
+written by an engine without these rules.
 
 ### Travel
 
@@ -516,31 +556,36 @@ no congestion and every citizen walks at the same speed.
 ## Invariants
 
 Source: `src/invariants/check.ts`. `checkInvariants(state)` runs after genesis, after
-every step (unless `INVARIANT_CHECKS=off`) and whenever a state is deserialised
-(snapshot restore, checkpoint load). Up to 50 violations are reported; any violation
-throws `InvariantViolationError`, which the server records as a halt (see
+every step and whenever a state is deserialised (snapshot restore, checkpoint load).
+With `INVARIANT_CHECKS=off` (a server setting meant for benchmarks only) **all** of these
+checks are skipped, including those at genesis and on restore: a stored state that
+passes the schema and hash checks but violates an invariant is then loaded without
+complaint. Up to 50 violations are reported; any violation throws
+`InvariantViolationError`, which the server records as a halt (see
 [API.md](API.md#halted-civilizations)).
 
-| Code                 | Property that must hold                                                                                                                                                                                                                                                                                           |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CLOCK`              | `tick` is a non-negative integer; no citizen's `activitySince` lies in the future.                                                                                                                                                                                                                                |
-| `IDENTITY`           | citizen, building, household and block ids are integers, strictly ascending (hence unique) and below their `nextIds` counter.                                                                                                                                                                                     |
-| `MAP`                | every building lies inside its block; every door lies inside the map on a road tile.                                                                                                                                                                                                                              |
-| `HOUSING`            | every household's home and every citizen's home is a house; a citizen lives in its household's home; residents ≤ capacity.                                                                                                                                                                                        |
-| `NEGATIVE_BALANCE`   | every balance is a safe integer number of cents and ≥ 0 (credit does not exist).                                                                                                                                                                                                                                  |
-| `MONEY_CONSERVATION` | `destroyedCents ≤ issuedCents` and `Σ balances = issuedCents − destroyedCents`.                                                                                                                                                                                                                                   |
-| `LOCATION`           | a travelling citizen has no location, activity `traveling`, existing endpoints and `departTick < arriveTick`, `departTick ≤ tick < arriveTick`; a non-travelling citizen is in an existing building, is not `traveling`, sleeps / stays `at_home` only in its own home and has `leisure` only at a plaza or park. |
-| `VENUE_CAPACITY`     | present plus incoming visitors of each non-home building ≤ its capacity.                                                                                                                                                                                                                                          |
-| `NEEDS_BOUNDS`       | energy is finite and within [0, 100].                                                                                                                                                                                                                                                                             |
-| `LIFE_STAGE`         | the stored life stage equals the stage implied by the age at the current tick.                                                                                                                                                                                                                                    |
-| `EVENT_SEQUENCE`     | (`checkEventSequence`) the events of a step have contiguous sequence numbers starting at the state's `nextEventSeq` from before the step, and all carry the step's tick.                                                                                                                                          |
+| Code                 | Property that must hold                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLOCK`              | `tick` is a non-negative integer; no citizen's `activitySince` lies in the future.                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `IDENTITY`           | citizen, building, household and block ids are integers, strictly ascending (hence unique) and below their `nextIds` counter.                                                                                                                                                                                                                                                                                                                                                                  |
+| `MAP`                | `roadPitch = blockSize + 1`, `width = cols · roadPitch + 1`, `height = rows · roadPitch + 1`; every block sits on its own grid cell (`x = col · roadPitch + 1`, `y = row · roadPitch + 1`, `col < cols`, `row < rows`); every building lies inside its block (hence inside the map) and overlaps no other building; every door lies inside the map on a road tile.                                                                                                                             |
+| `HOUSING`            | every household's home and every citizen's home is a house; a citizen lives in its household's home; residents ≤ capacity.                                                                                                                                                                                                                                                                                                                                                                     |
+| `NEGATIVE_BALANCE`   | every balance is a safe integer number of cents and ≥ 0 (credit does not exist).                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `MONEY_CONSERVATION` | `destroyedCents ≤ issuedCents` and `Σ balances = issuedCents − destroyedCents`.                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `LOCATION`           | a travelling citizen has no location, activity `traveling`, existing endpoints and `departTick < arriveTick`, `departTick ≤ tick < arriveTick`; a `leisure` trip goes from the citizen's home to a plaza or park and a `home` trip from a plaza or park to its home, with `arriveTick − departTick = travelTicks(from, to)`; a non-travelling citizen is in an existing building, is not `traveling`, sleeps / stays `at_home` only in its own home and has `leisure` only at a plaza or park. |
+| `VENUE_CAPACITY`     | present plus incoming visitors of each non-home building ≤ its capacity.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `NEEDS_BOUNDS`       | energy is finite and within [0, 100].                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `ENVIRONMENT`        | `temperatureC = round₁(dailyMeanTempC + offset[hour])`; with stochastic weather off, the weather is `clear` and `dailyMeanTempC` equals the seasonal baseline; with it on, `dailyMeanTempC` lies within ±15 °C of the baseline. A state with a storm or a non-baseline temperature while stochastic weather is off is therefore refused.                                                                                                                                                       |
+| `LIFE_STAGE`         | the stored life stage equals the stage implied by the age at the current tick.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `EVENT_SEQUENCE`     | (`checkEventSequence`) the events of a step have contiguous sequence numbers starting at the state's `nextEventSeq` from before the step, and all carry the step's tick.                                                                                                                                                                                                                                                                                                                       |
 
 Further guarantees enforced elsewhere:
 
 - The clock advances by exactly one per step by construction (`step()` sets
   `tick = tick + 1`).
 - `deserializeState` rejects JSON that fails the Zod `WorldStateSchema` (types, ranges,
-  unknown fields), any `schemaVersion` other than 1, and — when an expected hash is
+  unknown fields, a seed that `Simulation.create` would refuse — anything but 1–64
+  characters of `[A-Za-z0-9._-]`), any `schemaVersion` other than 1, and — when an expected hash is
   given, as for every snapshot and checkpoint — any state whose canonical hash differs
   from the stored one. A restored snapshot therefore always reproduces its recorded
   hash exactly.

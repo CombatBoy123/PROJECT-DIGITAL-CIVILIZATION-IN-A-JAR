@@ -11,6 +11,7 @@ const STATUS: Record<ErrorCode, number> = {
   CONFLICT: 409,
   HALTED: 409,
   INTERNAL: 500,
+  UNAVAILABLE: 503,
 };
 
 /** An error with a stable code that is safe to show to API clients. */

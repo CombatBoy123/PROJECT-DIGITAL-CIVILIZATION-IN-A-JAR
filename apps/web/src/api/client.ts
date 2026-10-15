@@ -1,11 +1,20 @@
-import { ERROR_CODES, apiPath, type ApiRoutePath, type ErrorCode } from '@civ/shared';
+import {
+  API_ROUTES,
+  ERROR_CODES,
+  apiPath,
+  type ApiRoutePath,
+  type ErrorCode,
+  type RouteInfo,
+} from '@civ/shared';
+import { observeResponse } from './access';
 import { getToken } from './token';
 
 /*
  * Typed fetch wrapper for the REST API. Every request goes through `request`, which
  * builds the URL from the shared route table, attaches the bearer token when the user
- * has entered one, and turns error responses into an ApiError carrying the server's
- * { code, message, details }.
+ * has entered one, turns error responses into an ApiError carrying the server's
+ * { code, message, details }, and reports each answer to the access store (which
+ * learns from it whether the token is an operator, viewer or rejected token).
  */
 
 export type QueryValue = string | number | boolean | null | undefined;
@@ -130,10 +139,13 @@ export function routeUrl(
   return apiPath(path, params) + buildQuery(query);
 }
 
-function headers(hasBody: boolean): Headers {
+const ROUTE_AUTH = new Map<string, RouteInfo['auth']>(
+  API_ROUTES.map((r) => [`${r.method} ${r.path}`, r.auth]),
+);
+
+function headers(hasBody: boolean, token: string | null): Headers {
   const h = new Headers({ Accept: 'application/json' });
   if (hasBody) h.set('Content-Type', 'application/json');
-  const token = getToken();
   if (token) h.set('Authorization', `Bearer ${token}`);
   return h;
 }
@@ -141,11 +153,13 @@ function headers(hasBody: boolean): Headers {
 /** Perform a request and return the raw Response (for downloads). Throws ApiError on failure. */
 export async function requestRaw(path: ApiRoutePath, options: RequestOptions = {}) {
   const hasBody = options.body !== undefined;
+  const method = options.method ?? 'GET';
+  const token = getToken();
   let response: Response;
   try {
     response = await fetch(routeUrl(path, options.params, options.query), {
-      method: options.method ?? 'GET',
-      headers: headers(hasBody),
+      method,
+      headers: headers(hasBody, token),
       body: hasBody ? JSON.stringify(options.body) : undefined,
       signal: options.signal,
     });
@@ -153,6 +167,7 @@ export async function requestRaw(path: ApiRoutePath, options: RequestOptions = {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     throw new ApiError(0, 'NETWORK_ERROR', 'The server could not be reached.');
   }
+  observeResponse(token, ROUTE_AUTH.get(`${method} ${path}`), response.status);
   if (!response.ok) throw await errorFromResponse(response);
   return response;
 }
