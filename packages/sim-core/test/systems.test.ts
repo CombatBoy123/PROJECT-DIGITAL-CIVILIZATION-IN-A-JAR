@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   calendarAt,
+  canStayAnotherHour,
   energyDelta,
   ENERGY_RULES,
   leaveProbability,
+  isNight,
+  outingFits,
   outingProbability,
   roadRoute,
   routeLength,
@@ -146,6 +149,58 @@ describe('routine', () => {
     }
   });
 
+  it('an outing must fit the day and the energy budget, and so must staying at a venue', () => {
+    const adult = (energy: number) =>
+      ({ lifeStage: 'adult', needs: { energy } }) as unknown as Citizen;
+    // 10:00 leaves 12 hours: a 5-hour walk each way plus one hour there fits, 6 hours does not.
+    expect(outingFits(adult(100), 10, 5)).toBe(true);
+    expect(outingFits(adult(100), 10, 6)).toBe(false);
+    // 19:00: only a one-hour walk fits (out 19–20, stay 20–21, back 21–22); at 20:00 nothing does.
+    expect(outingFits(adult(100), 19, 1)).toBe(true);
+    expect(outingFits(adult(100), 19, 2)).toBe(false);
+    expect(outingFits(adult(100), 20, 1)).toBe(false);
+    // Energy: 40 − 2·3·T − 2.5 must stay ≥ 20, so T ≤ 2 at energy 40.
+    expect(outingFits(adult(40), 10, 2)).toBe(true);
+    expect(outingFits(adult(40), 10, 3)).toBe(false);
+    // Staying another hour at 20:00 with a one-hour walk home arrives at 22:00 exactly.
+    expect(canStayAnotherHour(adult(80), 20, 1)).toBe(true);
+    expect(canStayAnotherHour(adult(80), 20, 2)).toBe(false);
+    expect(canStayAnotherHour(adult(80), 21, 1)).toBe(false);
+    // 30 − 2.5 − 3 = 24.5 ≥ 20, but 26 − 2.5 − 3 = 20.5 and 25 − 2.5 − 3 = 19.5.
+    expect(canStayAnotherHour(adult(26), 12, 1)).toBe(true);
+    expect(canStayAnotherHour(adult(25), 12, 1)).toBe(false);
+  });
+
+  // Regression: large or slow worlds used to send citizens on trips that arrived at
+  // night or took a whole day, so they stayed awake for days at zero energy.
+  it.each([
+    { population: 1000, movement: { walkTilesPerTick: 4 }, days: 3 },
+    { population: 5000, movement: { walkTilesPerTick: 24 }, days: 2 },
+  ])(
+    'at population $population and walking speed $movement.walkTilesPerTick nobody is out at night',
+    ({ days, ...config }) => {
+      const { simulation } = Simulation.create('demo', config);
+      for (let i = 0; i < 24 * days; i++) {
+        simulation.step();
+        const hour = simulation.calendar.hour;
+        for (const c of simulation.state.citizens) {
+          if (isNight(hour)) {
+            expect(c.locationId).toBe(c.homeId);
+            expect(c.activity).toBe('sleeping');
+          }
+          if (c.travel) {
+            // Every trip ends by 22:00 of the day it started on.
+            const departHour = calendarAt(c.travel.departTick, simulation.state.config).hour;
+            expect(c.travel.arriveTick - c.travel.departTick).toBeLessThanOrEqual(22 - departHour);
+            // Nobody walks while exhausted (energy is projected to stay ≥ sleepEnergy).
+            expect(c.needs.energy).toBeGreaterThanOrEqual(ROUTINE_RULES.sleepEnergy - 0.01);
+          }
+        }
+      }
+    },
+    20_000,
+  );
+
   it('citizens go out during the day and use public venues', () => {
     const { simulation } = newSimulation('daytime');
     const results = simulation.run(24 * 3);
@@ -154,8 +209,10 @@ describe('routine', () => {
   });
 
   it('nobody starts an outing during a storm and visitors head home', () => {
-    const { simulation } = newSimulation('storm', { stochastic: { weather: false } });
+    // Stochastic weather stays on: a storm with it disabled is an impossible state.
+    const { simulation } = newSimulation('storm');
     runUntil(simulation, 24 + 14); // day 2, 14:00 — people are out
+    expect(simulation.state.citizens.some((c) => c.activity === 'leisure')).toBe(true);
     const state = cloneState(simulation);
     state.environment.weather = 'storm';
     const stormy = Simulation.fromState(state);

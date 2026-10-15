@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { SimulationConfigSchema } from '../config.js';
+import { SeedSchema, SimulationConfigSchema } from '../config.js';
 import { SEASONS } from '../time/clock.js';
 
 /*
@@ -157,7 +157,8 @@ export const LedgerSchema = z.strictObject({
 
 export const WorldStateSchema = z.strictObject({
   schemaVersion: z.literal(1),
-  seed: z.string().min(1).max(64),
+  /** Same contract as at creation, so a restored state can always be re-created from its seed. */
+  seed: SeedSchema,
   config: SimulationConfigSchema,
   /** Current simulation time; genesis is tick 0. */
   tick: tick.min(0),

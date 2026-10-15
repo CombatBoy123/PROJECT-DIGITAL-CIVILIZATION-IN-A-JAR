@@ -32,6 +32,12 @@ export const HOURLY_TEMP_OFFSET_C: readonly number[] = [
 export const DAILY_TEMP_SD_C = 2.5;
 
 /**
+ * Largest possible daily deviation from the seasonal baseline (°C): `Rng.normal` is
+ * bounded to mean ± 6·sd.
+ */
+export const MAX_DAILY_TEMP_DEVIATION_C = 6 * DAILY_TEMP_SD_C;
+
+/**
  * Daily weather transition weights per season: row = yesterday's weather, columns =
  * today's weather in the order of WEATHER (clear, cloudy, rain, storm). Integers,
  * each row sums to 100.
@@ -72,7 +78,8 @@ function drawDailyMean(season: Season, rng: Rng | null): number {
   return rng ? roundTenth(rng.normal(base, DAILY_TEMP_SD_C)) : base;
 }
 
-function hourlyTemperature(dailyMean: number, hour: number): number {
+/** Temperature at an hour of a day with the given daily mean (°C, rounded to 0.1). */
+export function hourlyTemperature(dailyMean: number, hour: number): number {
   return roundTenth(dailyMean + (HOURLY_TEMP_OFFSET_C[hour] ?? 0));
 }
 

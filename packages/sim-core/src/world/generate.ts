@@ -360,10 +360,14 @@ export function generateWorld(seed: string, config: SimulationConfig): GenesisRe
       const y = block.y + ly;
       const doorY = ly === 0 ? block.y - 1 : block.y + BLOCK_SIZE;
       const doorX = x + 1;
+      // The house across the road has the same door tile, so the side of the road sets the
+      // parity of the house number: even below the road (top lots, whose door is on the
+      // road above their block), odd above it (bottom lots). Addresses are thus unique.
+      const houseNumber = 2 * doorX + (ly === 0 ? 0 : 1);
       const house: Building = {
         id: nextBuildingId++,
         kind: 'house',
-        name: `${doorX} ${streetName(doorY / map.roadPitch)}`,
+        name: `${houseNumber} ${streetName(doorY / map.roadPitch)}`,
         blockId: block.id,
         x,
         y,

@@ -89,6 +89,16 @@ describe('save and restore', () => {
     expect(() => Simulation.deserialize(JSON.stringify(state))).toThrow(StateRestoreError);
   });
 
+  it('rejects seeds that creation would refuse, such as the random-stream key separator', () => {
+    const { simulation } = newSimulation('seed');
+    for (const seed of ['seed\u001fweather', 'with space', '']) {
+      const state = cloneState(simulation);
+      state.seed = seed;
+      expect(() => Simulation.create(seed)).toThrow();
+      expect(() => Simulation.deserialize(JSON.stringify(state))).toThrow(StateRestoreError);
+    }
+  });
+
   it('fromState deep-copies so later mutation of the input has no effect', () => {
     const { simulation } = newSimulation('alias');
     const state = cloneState(simulation);

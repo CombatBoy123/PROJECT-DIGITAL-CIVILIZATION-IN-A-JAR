@@ -1,20 +1,52 @@
 import { describe, expect, it } from 'vitest';
 import {
+  calendarAt,
   checkEventSequence,
   checkInvariants,
+  hourlyTemperature,
   InvariantViolationError,
   Simulation,
+  travelTicks,
+  type Building,
+  type Citizen,
   type InvariantCode,
+  type Travel,
   type WorldState,
 } from '../src/index.js';
 import { cloneState, newSimulation } from './helpers.js';
 
-function codesAfter(mutate: (s: WorldState) => void): InvariantCode[] {
-  const { simulation } = newSimulation('invariants');
+function codesAfter(
+  mutate: (s: WorldState) => void,
+  config: Record<string, unknown> = {},
+): InvariantCode[] {
+  const { simulation } = newSimulation('invariants', config);
   simulation.run(30);
   const state = cloneState(simulation);
   mutate(state);
   return checkInvariants(state).map((v) => v.code);
+}
+
+/** Put the first citizen on a trip (by default a correctly timed one to the first venue). */
+function sendOnTrip(
+  s: WorldState,
+  pick: (home: Building, venue: Building, other: Building) => [Building, Building],
+  adjust: (trip: Travel) => void = () => undefined,
+): void {
+  const c = s.citizens[0] as Citizen;
+  const home = s.buildings.find((b) => b.id === c.homeId)!;
+  const venue = s.buildings.find((b) => b.kind === 'plaza')!;
+  const other = s.buildings.find((b) => b.kind === 'house' && b.id !== c.homeId)!;
+  const [from, to] = pick(home, venue, other);
+  c.travel = {
+    fromId: from.id,
+    toId: to.id,
+    departTick: s.tick,
+    arriveTick: s.tick + travelTicks(s, from, to),
+    purpose: to.id === c.homeId ? 'home' : 'leisure',
+  };
+  adjust(c.travel);
+  c.locationId = null;
+  c.activity = 'traveling';
 }
 
 describe('invariants', () => {
@@ -112,6 +144,83 @@ describe('invariants', () => {
         c.activity = 'traveling';
       }),
     ).toContain('LOCATION');
+  });
+
+  it('accepts correctly timed trips between home and a venue', () => {
+    expect(codesAfter((s) => sendOnTrip(s, (home, venue) => [home, venue]))).toEqual([]);
+    expect(codesAfter((s) => sendOnTrip(s, (home, venue) => [venue, home]))).toEqual([]);
+  });
+
+  it('detects trips to the wrong place, with the wrong purpose or of the wrong length', () => {
+    // To another family's house.
+    expect(codesAfter((s) => sendOnTrip(s, (home, _venue, other) => [home, other]))).toContain(
+      'LOCATION',
+    );
+    // To a venue, but labelled as going home.
+    expect(
+      codesAfter((s) =>
+        sendOnTrip(
+          s,
+          (home, venue) => [home, venue],
+          (t) => void (t.purpose = 'home'),
+        ),
+      ),
+    ).toContain('LOCATION');
+    // A 1000-hour walk, and (at a slow walking speed, so the route takes several hours)
+    // a trip that arrives faster than the route allows.
+    expect(
+      codesAfter((s) =>
+        sendOnTrip(
+          s,
+          (home, venue) => [home, venue],
+          (t) => void (t.arriveTick = t.departTick + 1000),
+        ),
+      ),
+    ).toContain('LOCATION');
+    const slow = { movement: { walkTilesPerTick: 4 } };
+    expect(
+      codesAfter((s) => {
+        sendOnTrip(s, (home, venue) => [home, venue]);
+        const trip = s.citizens[0]!.travel!;
+        expect(trip.arriveTick - trip.departTick).toBeGreaterThan(1);
+        trip.arriveTick = trip.departTick + 1;
+      }, slow),
+    ).toContain('LOCATION');
+  });
+
+  it('detects overlapping buildings and buildings outside the map', () => {
+    expect(
+      codesAfter((s) => {
+        const plaza = s.buildings.find((b) => b.kind === 'plaza')!;
+        const house = s.buildings.find((b) => b.kind === 'house')!;
+        Object.assign(house, { blockId: plaza.blockId, x: plaza.x, y: plaza.y, door: plaza.door });
+      }),
+    ).toContain('MAP');
+    expect(
+      codesAfter((s) => {
+        // Shift a block (and everything on it) beyond the map edge.
+        const block = s.map.blocks[0]!;
+        block.x += s.map.width;
+        for (const b of s.buildings.filter((b) => b.blockId === block.id)) b.x += s.map.width;
+      }),
+    ).toContain('MAP');
+    expect(codesAfter((s) => void (s.map.width += 1))).toContain('MAP');
+  });
+
+  it('detects an environment that contradicts the weather settings', () => {
+    const off = { stochastic: { weather: false } };
+    expect(codesAfter(() => undefined, off)).toEqual([]);
+    expect(codesAfter((s) => void (s.environment.weather = 'storm'), off)).toContain('ENVIRONMENT');
+    expect(codesAfter((s) => void (s.environment.dailyMeanTempC += 3), off)).toContain(
+      'ENVIRONMENT',
+    );
+    expect(codesAfter((s) => void (s.environment.temperatureC = 9999))).toContain('ENVIRONMENT');
+    // A 60 °C day in spring, with an hourly temperature consistent with it.
+    const heatwave = codesAfter((s) => {
+      s.environment.dailyMeanTempC = 60;
+      s.environment.temperatureC = hourlyTemperature(60, calendarAt(s.tick, s.config).hour);
+    });
+    expect(heatwave).toEqual(['ENVIRONMENT']);
   });
 
   it('detects needs out of bounds', () => {

@@ -1,8 +1,9 @@
 import type { SimSystem, TickContext } from '../engine/context.js';
 import type { Rng } from '../rng/rng.js';
 import type { Building, Citizen, Weather, WorldState } from '../state/schema.js';
-import { isNight } from '../time/clock.js';
+import { hoursUntilNight, isNight } from '../time/clock.js';
 import { roadRoute, routeLength } from '../world/roads.js';
+import { energyDelta } from './needs.js';
 
 /*
  * Stage 7 — daily routine and movement (Phase 1).
@@ -15,9 +16,13 @@ import { roadRoute, routeLength } from '../world/roads.js';
  *  - at home: sleep at night or when tired; wake in daytime once rested (sooner
  *    for conscientious citizens); otherwise
  *    possibly go out to a public venue (probability depends on hour of day,
- *    extraversion, weather and energy);
- *  - at a venue: go home at night, when tired, in a storm, or with a leave
- *    probability that is higher for introverts and after long stays.
+ *    extraversion, weather and energy). Only venues that can be reached, enjoyed
+ *    for at least `outingMinStayHours` and left again so that the citizen is home
+ *    by 22:00 with energy to spare are eligible ({@link outingFits});
+ *  - at a venue: go home at night, when tired, in a storm, when staying another
+ *    hour would keep the citizen from being home by 22:00 or would bring it home exhausted
+ *    ({@link canStayAnotherHour}), or with a leave probability that is higher for
+ *    introverts and after long stays.
  *
  * Random draws use the stream hash(seed, "routine", tick, citizenId), so one
  * citizen's choices never shift another citizen's random numbers.
@@ -33,6 +38,11 @@ export const ROUTINE_RULES = {
   sleepEnergy: 20,
   /** Minimum energy to consider an outing. */
   outingMinEnergy: 40,
+  /**
+   * Hours at the venue an outing must leave room for. The arrival hour counts, so 1 is
+   * the shortest possible visit: arrive, spend the hour there, leave at the next tick.
+   */
+  outingMinStayHours: 1,
   /** Leave a venue when energy falls below this level. */
   leaveVenueEnergy: 30,
   /** Base hourly probability of going out, by hour of day (before personality and weather). */
@@ -78,10 +88,47 @@ export function leaveProbability(citizen: Citizen, tick: number): number {
   );
 }
 
+/** Travel time in ticks for a road route of `length` tiles (at least 1). */
+function ticksForLength(state: WorldState, length: number): number {
+  return Math.max(1, Math.ceil(length / state.config.movement.walkTilesPerTick));
+}
+
 /** Travel time in ticks between two buildings along the road network (at least 1). */
 export function travelTicks(state: WorldState, from: Building, to: Building): number {
-  const length = routeLength(roadRoute(state.map, from.door, to.door));
-  return Math.max(1, Math.ceil(length / state.config.movement.walkTilesPerTick));
+  return ticksForLength(state, routeLength(roadRoute(state.map, from.door, to.door)));
+}
+
+/** Energy a citizen spends per hour on an activity (positive; elders tire faster). */
+function drain(citizen: Citizen, activity: 'traveling' | 'leisure'): number {
+  return -energyDelta(activity, citizen.lifeStage === 'elder');
+}
+
+/**
+ * Whether an outing whose one-way trip takes `tripTicks` fits the day and the
+ * citizen's energy when starting at `hour`: the walk there, the minimum stay and the
+ * walk back must all end by 22:00, and the energy projected for the moment the
+ * citizen gets home must not fall below `sleepEnergy`.
+ */
+export function outingFits(citizen: Citizen, hour: number, tripTicks: number): boolean {
+  const stay = ROUTINE_RULES.outingMinStayHours;
+  if (2 * tripTicks + stay > hoursUntilNight(hour)) return false;
+  const energyAtHome =
+    citizen.needs.energy -
+    2 * tripTicks * drain(citizen, 'traveling') -
+    stay * drain(citizen, 'leisure');
+  return energyAtHome >= ROUTINE_RULES.sleepEnergy;
+}
+
+/**
+ * Whether a citizen at a venue at `hour` can stay one more hour and still walk home
+ * (`tripTicks` long) by 22:00 with energy of at least `sleepEnergy`. When this is
+ * false the citizen must leave now.
+ */
+export function canStayAnotherHour(citizen: Citizen, hour: number, tripTicks: number): boolean {
+  if (1 + tripTicks > hoursUntilNight(hour)) return false;
+  const energyAtHome =
+    citizen.needs.energy - drain(citizen, 'leisure') - tripTicks * drain(citizen, 'traveling');
+  return energyAtHome >= ROUTINE_RULES.sleepEnergy;
 }
 
 function startTrip(
@@ -114,6 +161,7 @@ function chooseVenue(
   const weights = venues.map((venue) => {
     if ((load.get(venue.id) ?? 0) >= venue.capacity) return 0;
     const distance = routeLength(roadRoute(ctx.state.map, from.door, venue.door));
+    if (!outingFits(citizen, ctx.calendar.hour, ticksForLength(ctx.state, distance))) return 0;
     const preference =
       venue.kind === 'park'
         ? 0.5 + citizen.personality.openness
@@ -185,13 +233,17 @@ export const routineSystem: SimSystem = {
       }
 
       // At a public venue.
+      const home = index.building(citizen.homeId);
       const mustLeave =
-        night || citizen.needs.energy < ROUTINE_RULES.leaveVenueEnergy || weather === 'storm';
+        night ||
+        citizen.needs.energy < ROUTINE_RULES.leaveVenueEnergy ||
+        weather === 'storm' ||
+        !canStayAnotherHour(citizen, calendar.hour, travelTicks(state, here, home));
       const leaves =
         mustLeave || ctx.rng('routine', citizen.id).chance(leaveProbability(citizen, tick));
       if (leaves) {
         load.set(here.id, (load.get(here.id) ?? 1) - 1);
-        startTrip(ctx, citizen, here, index.building(citizen.homeId), 'home');
+        startTrip(ctx, citizen, here, home, 'home');
       }
     }
   },

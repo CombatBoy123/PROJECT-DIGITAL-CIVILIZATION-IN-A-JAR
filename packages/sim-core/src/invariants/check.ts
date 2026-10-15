@@ -1,6 +1,13 @@
 import type { SimEvent } from '../events/types.js';
 import { ageInYears, lifeStageForAge } from '../systems/demography.js';
-import type { WorldState } from '../state/schema.js';
+import {
+  hourlyTemperature,
+  MAX_DAILY_TEMP_DEVIATION_C,
+  SEASON_BASE_TEMP_C,
+} from '../systems/environment.js';
+import { travelTicks } from '../systems/routine.js';
+import type { Building, WorldState } from '../state/schema.js';
+import { calendarAt } from '../time/clock.js';
 import { isRoad } from '../world/roads.js';
 
 /*
@@ -20,6 +27,7 @@ export type InvariantCode =
   | 'NEEDS_BOUNDS'
   | 'LIFE_STAGE'
   | 'MAP'
+  | 'ENVIRONMENT'
   | 'EVENT_SEQUENCE';
 
 export interface InvariantViolation {
@@ -45,6 +53,14 @@ export class InvariantViolationError extends Error {
 
 /** Maximum violations reported per check, to keep reports readable. */
 const MAX_VIOLATIONS = 50;
+
+function isVenue(b: Building): boolean {
+  return b.kind === 'plaza' || b.kind === 'park';
+}
+
+function overlaps(a: Building, b: Building): boolean {
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+}
 
 function checkSortedUnique(
   list: readonly { id: number }[],
@@ -87,9 +103,39 @@ export function checkInvariants(state: WorldState): InvariantViolation[] {
   checkSortedUnique(state.households, state.nextIds.household, 'household', out);
   checkSortedUnique(state.map.blocks, state.nextIds.block, 'block', out);
 
-  // Map: buildings inside the map and inside their block; doors on roads.
-  const blocks = new Map(state.map.blocks.map((b) => [b.id, b]));
+  // Map: the road grid and the blocks between its roads cover the map exactly; every
+  // building lies inside its block (hence inside the map) without overlapping another;
+  // doors on roads.
+  const map = state.map;
+  if (
+    map.roadPitch !== map.blockSize + 1 ||
+    map.width !== map.cols * map.roadPitch + 1 ||
+    map.height !== map.rows * map.roadPitch + 1
+  ) {
+    push({
+      code: 'MAP',
+      message: `Map ${map.width}×${map.height} does not match ${map.cols}×${map.rows} blocks of ${map.blockSize} tiles at road pitch ${map.roadPitch}`,
+    });
+  }
+  const cells = new Set<number>();
+  for (const block of map.blocks) {
+    const onGrid =
+      block.col < map.cols &&
+      block.row < map.rows &&
+      block.x === block.col * map.roadPitch + 1 &&
+      block.y === block.row * map.roadPitch + 1;
+    const cell = block.row * map.cols + block.col;
+    if (!onGrid || cells.has(cell)) {
+      push({
+        code: 'MAP',
+        message: `Block ${block.id} at (${block.x}, ${block.y}) is not on a free grid cell`,
+      });
+    }
+    cells.add(cell);
+  }
+  const blocks = new Map(map.blocks.map((b) => [b.id, b]));
   const buildings = new Map(state.buildings.map((b) => [b.id, b]));
+  const buildingsByBlock = new Map<number, Building[]>();
   for (const b of state.buildings) {
     const block = blocks.get(b.blockId);
     const inside =
@@ -104,6 +150,16 @@ export function checkInvariants(state: WorldState): InvariantViolation[] {
         message: `Building ${b.id} lies outside its block`,
         entity: { kind: 'building', id: b.id },
       });
+    const neighbours = buildingsByBlock.get(b.blockId) ?? [];
+    const other = neighbours.find((n) => overlaps(n, b));
+    if (other)
+      push({
+        code: 'MAP',
+        message: `Building ${b.id} overlaps building ${other.id}`,
+        entity: { kind: 'building', id: b.id },
+      });
+    neighbours.push(b);
+    buildingsByBlock.set(b.blockId, neighbours);
     const doorOk =
       b.door.x < state.map.width &&
       b.door.y < state.map.height &&
@@ -175,10 +231,29 @@ export function checkInvariants(state: WorldState): InvariantViolation[] {
           entity,
         });
       }
-      if (!buildings.has(t.fromId) || !buildings.has(t.toId)) {
+      const from = buildings.get(t.fromId);
+      const to = buildings.get(t.toId);
+      if (!from || !to) {
         push({
           code: 'LOCATION',
           message: `Citizen ${c.id} travels between unknown buildings`,
+          entity,
+        });
+      } else if (
+        t.purpose === 'leisure'
+          ? from.id !== c.homeId || !isVenue(to)
+          : to.id !== c.homeId || !isVenue(from)
+      ) {
+        // Phase 1 routine: leisure trips go from home to a venue, home trips back.
+        push({
+          code: 'LOCATION',
+          message: `Citizen ${c.id} makes a ${t.purpose} trip from ${from.kind} ${from.id} to ${to.kind} ${to.id}`,
+          entity,
+        });
+      } else if (t.arriveTick - t.departTick !== travelTicks(state, from, to)) {
+        push({
+          code: 'LOCATION',
+          message: `Citizen ${c.id} trip from ${from.id} to ${to.id} lasts ${t.arriveTick - t.departTick} ticks instead of ${travelTicks(state, from, to)}`,
           entity,
         });
       }
@@ -262,6 +337,35 @@ export function checkInvariants(state: WorldState): InvariantViolation[] {
         code: 'VENUE_CAPACITY',
         message: `Venue ${venueId} has ${count} visitors but capacity ${venue.capacity}`,
         entity: { kind: 'building', id: venueId },
+      });
+    }
+  }
+
+  // Environment: the temperature follows the daily mean and the hour-of-day profile; the
+  // daily mean stays within the bounded deviation from the seasonal baseline, which it
+  // equals (with permanently clear weather) when stochastic weather is off.
+  if (Number.isInteger(state.tick) && state.tick >= 0) {
+    const env = state.environment;
+    const calendar = calendarAt(state.tick, state.config);
+    const baseline = SEASON_BASE_TEMP_C[calendar.season];
+    if (!state.config.stochastic.weather) {
+      if (env.weather !== 'clear' || env.dailyMeanTempC !== baseline) {
+        push({
+          code: 'ENVIRONMENT',
+          message: `Weather ${env.weather} at ${env.dailyMeanTempC} °C while stochastic weather is off (expected clear at ${baseline} °C)`,
+        });
+      }
+    } else if (!(Math.abs(env.dailyMeanTempC - baseline) <= MAX_DAILY_TEMP_DEVIATION_C + 1e-9)) {
+      push({
+        code: 'ENVIRONMENT',
+        message: `Daily mean ${env.dailyMeanTempC} °C is more than ${MAX_DAILY_TEMP_DEVIATION_C} °C from the ${calendar.season} baseline ${baseline} °C`,
+      });
+    }
+    const expected = hourlyTemperature(env.dailyMeanTempC, calendar.hour);
+    if (env.temperatureC !== expected) {
+      push({
+        code: 'ENVIRONMENT',
+        message: `Temperature ${env.temperatureC} °C at ${calendar.hour}:00 ≠ ${expected} °C implied by the daily mean`,
       });
     }
   }

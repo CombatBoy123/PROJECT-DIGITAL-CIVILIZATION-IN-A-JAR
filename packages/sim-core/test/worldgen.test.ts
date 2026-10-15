@@ -71,6 +71,14 @@ describe('world generation', () => {
     for (const b of state.buildings) expect(isRoad(state.map, b.door.x, b.door.y)).toBe(true);
   });
 
+  it('gives every building a unique name, including houses facing each other across a road', () => {
+    for (const population of [120, 1000]) {
+      const { buildings } = generateWorld('addresses', parseConfig({ population })).state;
+      const names = buildings.map((b) => b.name);
+      expect(new Set(names).size).toBe(names.length);
+    }
+  });
+
   it('zones blocks for all land uses', () => {
     const zones = new Set(state.map.blocks.map((b) => b.zone));
     expect(zones).toEqual(new Set(['civic', 'commercial', 'residential', 'farmland']));

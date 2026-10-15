@@ -1,6 +1,6 @@
 import { cyrb128 } from './hash.js';
 
-/** Separator that cannot appear in numeric keys and is unlikely in stream names. */
+/** Separator that cannot appear in seeds (see `SeedSchema`) or numeric keys and is unlikely in stream names. */
 const KEY_SEPARATOR = '\u001f';
 
 /** Number of initial outputs discarded so that similar seeds produce unrelated streams. */

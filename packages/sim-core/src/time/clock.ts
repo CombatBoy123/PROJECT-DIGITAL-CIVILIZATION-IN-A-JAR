@@ -57,9 +57,19 @@ export function wholeYearsBetween(
   return Math.floor((toTick - fromTick) / ticksPerYear(config));
 }
 
+/** First hour of the night (22:00). */
+export const NIGHT_START_HOUR = 22;
+/** First hour after the night (06:00). */
+export const NIGHT_END_HOUR = 6;
+
 /** Night hours: 22:00–05:59. */
 export function isNight(hour: number): boolean {
-  return hour >= 22 || hour < 6;
+  return hour >= NIGHT_START_HOUR || hour < NIGHT_END_HOUR;
+}
+
+/** Whole hours from the start of `hour` until the night begins at 22:00 (0 during the night). */
+export function hoursUntilNight(hour: number): number {
+  return isNight(hour) ? 0 : NIGHT_START_HOUR - hour;
 }
 
 /** Human-readable timestamp, e.g. "Y1 spring D3 07:00". */
