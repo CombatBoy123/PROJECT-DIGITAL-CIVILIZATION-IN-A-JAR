@@ -6,11 +6,13 @@ import {
   SeedSchema,
   SimulationConfigSchema,
   type Calendar,
+  type CitizenFrameTuple,
   type EntityRef,
   type EventType,
   type MetricKey,
   type SimulationConfig,
   type Skills,
+  type Weather,
   type WorldLayout,
 } from '@civ/sim-core';
 import { z } from 'zod';
@@ -303,4 +305,62 @@ export interface MetaResponse {
   readRequiresToken: boolean;
   frameRate: number;
   maxStepsPerRequest: number;
+}
+
+export interface HealthResponse {
+  ok: boolean;
+  database: 'up' | 'down';
+}
+
+/** Generic list wrapper for small, unpaginated collections (civilizations, snapshots). */
+export interface ListResponse<T> {
+  items: T[];
+}
+
+export const AuditQuerySchema = z.strictObject({
+  /** Keyset cursor: return entries with id < before (newest first). */
+  before: optionalInt(1, Number.MAX_SAFE_INTEGER),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+export type AuditQuery = z.input<typeof AuditQuerySchema>;
+
+export interface AuditPage {
+  items: AuditEntryDto[];
+  nextCursor: number | null;
+}
+
+/** Current positions of every citizen (same shape as the stream's keyframe). */
+export interface FrameResponse {
+  tick: number;
+  calendar: Calendar;
+  weather: Weather;
+  temperatureC: number;
+  citizens: CitizenFrameTuple[];
+}
+
+/** Raw (not downsampled) metric samples as CSV. */
+export const MetricsExportQuerySchema = z.strictObject({
+  keys: csv.optional(),
+  fromTick: optionalInt(0, 2_000_000_000),
+  toTick: optionalInt(0, 2_000_000_000),
+});
+
+/** Events as NDJSON (one EventDto per line, ascending seq), streamed in pages by the server. */
+export const EventsExportQuerySchema = z.strictObject({
+  types: csv.optional(),
+  fromTick: optionalInt(0, 2_000_000_000),
+  toTick: optionalInt(0, 2_000_000_000),
+});
+
+/** Experiment configuration export: everything needed to recreate the run's genesis. */
+export interface ConfigExport {
+  format: 'civ-config';
+  formatVersion: 1;
+  name: string;
+  seed: string;
+  engineVersion: string;
+  configSchemaVersion: number;
+  config: SimulationConfig;
+  exportedAtTick: number;
+  stateHashAtExport: string;
 }
