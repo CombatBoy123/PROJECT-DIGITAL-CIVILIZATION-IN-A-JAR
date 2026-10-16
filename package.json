@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "pnpm --parallel --filter @civ/server --filter @civ/web dev",
     "build": "pnpm -r build",
+    "demo:build": "node scripts/build-demo-artifact.mjs",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",
     "format": "prettier --write .",

@@ -124,6 +124,33 @@ docker compose --profile app up -d --build      # http://localhost:3001
   without a token and for a rejected token. A viewer token is recognised at its first
   refused operator action. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#authentication).
 
+## Browser demo
+
+A standalone, single-file version of the simulator that runs entirely in the browser,
+phones included: the real engine (`@civ/sim-core`) steps in the page and the real
+PixiJS map draws it. No server and no database are involved.
+
+```sh
+pnpm demo:build    # → apps/web/dist-demo/digital-civilization-in-a-jar.html
+```
+
+`demo:build` runs the Vite demo build (`apps/web/vite.demo.config.ts`, entry
+`apps/web/demo.html`) and inlines the CSS and the single JS bundle into one HTML
+fragment (about 1 MB) meant to be published as a page: a `<title>`, one `<style>`,
+`<div id="root">` and one `<script type="module">`, with no network requests and no
+`eval` (PixiJS's CSP-safe `pixi.js/unsafe-eval` build, Zod's JIT off). For live
+development run `pnpm --filter @civ/web exec vite --config vite.demo.config.ts` and
+open `/demo.html`. Source: `apps/web/src/demo/`.
+
+The demo has the map (pinch, pan, tap to select), playback (1, 4, 12 or 48 simulated
+hours per second, +1 hour, +1 day), an inspector, a searchable people list, live
+statistics with their definitions, the newest 400 events, and a World tab: generate a
+new world (seed, 10–1,000 people, days per season, stochastic weather), one in-memory
+save point, reset to genesis, and the state fingerprint (`demo-1` with 100 people
+reads `cc32f723…` at tick 24, as in [EXPERIMENTS.md](docs/EXPERIMENTS.md)). Compared
+with the full app it has no persistence (a reload starts over), no history beyond the
+recent events, no snapshots on disk, no exports and no operator/viewer access tokens.
+
 ## Commands
 
 | Command                                                                | What it does                                                             |
@@ -136,6 +163,7 @@ docker compose --profile app up -d --build      # http://localhost:3001
 | `pnpm check`                                                           | format check, lint, type-check, unit and integration tests               |
 | `pnpm test`                                                            | unit and integration tests (server tests use `civ_test`)                 |
 | `pnpm test:e2e`                                                        | `db:migrate:e2e`, then the Playwright browser tests (on `civ_e2e`)       |
+| `pnpm demo:build`                                                      | build the single-file browser demo ([Browser demo](#browser-demo))       |
 | `pnpm benchmark`                                                       | engine tick benchmark                                                    |
 | `pnpm --filter @civ/sim-core exec tsx ../../scripts/reproduce-demo.ts` | reproducibility walkthrough ([docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)) |
 
@@ -148,8 +176,10 @@ packages/shared/     API contract: Zod request schemas, response DTOs, route tab
 apps/server/         Fastify API, simulation runners, persistence, WebSocket stream
   prisma/            schema.prisma and SQL migrations
 apps/web/            React observatory, PixiJS world renderer, Recharts dashboard
+  src/demo/          standalone browser demo (engine in the page; see Browser demo)
   e2e/               Playwright browser tests
-scripts/             reproduce-demo.ts, Docker entry point, PostgreSQL init script
+scripts/             reproduce-demo.ts, build-demo-artifact.mjs, Docker entry point,
+                     PostgreSQL init script
 docs/                documentation (below)
 Dockerfile, docker-compose.yml, .github/workflows/ci.yml
 ```

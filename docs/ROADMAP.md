@@ -46,6 +46,9 @@ items whose implementation exists but could not be verified are marked in progre
 - [~] CI workflow (`.github/workflows/ci.yml`) — valid YAML; every command it runs
   except the image job passed locally; not yet run on GitHub
 - [x] Documentation set (this folder and the README)
+- [x] Browser demo: the engine and the PixiJS map in one self-contained HTML file
+      for phones and desktop, no server (`pnpm demo:build`; see the README) — engine
+      controller unit tests pass, including the documented `demo-1` hash at tick 24
 
 ### Acceptance criteria
 
