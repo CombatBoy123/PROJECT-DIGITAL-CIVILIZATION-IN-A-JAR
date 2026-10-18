@@ -1,0 +1,231 @@
+/*
+ * World map: the canvas surface fills the container; HTML overlays (controls, legend,
+ * minimap, tooltip) sit on top. Colours use the design tokens with fallbacks so the
+ * component also renders outside the observatory page.
+ */
+
+.world-view {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #0c0d10;
+  container: world / inline-size;
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.world-surface {
+  position: absolute;
+  inset: 0;
+  outline: none;
+  /* Pan and pinch are handled by the map, not by browser scrolling/zooming. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.world-surface:focus-visible::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 2px var(--accent, #a597f5);
+  pointer-events: none;
+}
+
+.world-canvas {
+  display: block;
+}
+
+.world-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Shared look of floating panels */
+.world-controls,
+.world-legend,
+.world-minimap,
+.world-tooltip {
+  border: 1px solid var(--border, #2a2c33);
+  background: rgba(23, 24, 28, 0.9);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+
+/* Zoom / fit buttons */
+.world-controls {
+  position: absolute;
+  top: var(--sp-3, 12px);
+  right: var(--sp-3, 12px);
+  display: flex;
+  flex-direction: column;
+  padding: 2px;
+  border-radius: var(--radius-m, 6px);
+}
+
+.world-control {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-s, 4px);
+  background: transparent;
+  color: var(--text-2, #bdbcc8);
+  cursor: pointer;
+  transition:
+    background var(--dur, 140ms) var(--ease, ease),
+    color var(--dur, 140ms) var(--ease, ease);
+}
+
+.world-control + .world-control {
+  margin-top: 2px;
+}
+
+.world-control:hover {
+  background: var(--surface-3, #272930);
+  color: var(--text, #ecebf1);
+}
+
+.world-control:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent, #a597f5);
+}
+
+.world-control svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Activity legend */
+.world-legend {
+  position: absolute;
+  left: var(--sp-3, 12px);
+  bottom: var(--sp-3, 12px);
+  padding: 6px 10px;
+  border-radius: var(--radius-m, 6px);
+  font-size: var(--fs-xs, 0.72rem);
+  color: var(--text-2, #bdbcc8);
+  pointer-events: none;
+}
+
+.world-legend ul {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 8px;
+  row-gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  align-items: center;
+}
+
+.world-legend li {
+  display: contents;
+}
+
+.world-legend-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px #0c0d10;
+}
+
+.world-legend-count {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  color: var(--text, #ecebf1);
+  text-align: right;
+}
+
+/* Minimap */
+.world-minimap {
+  position: absolute;
+  right: var(--sp-3, 12px);
+  bottom: var(--sp-3, 12px);
+  display: block;
+  /* Scales with the map width (container query units); the viewBox keeps the aspect. */
+  width: clamp(88px, 16cqw, 152px);
+  height: auto;
+  border-radius: var(--radius-s, 4px);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Hover tooltip (positioned by WorldView at the pointer) */
+.world-tooltip {
+  --tx: 14px;
+  --ty: 16px;
+  position: absolute;
+  z-index: 2;
+  max-width: 240px;
+  padding: 6px 9px;
+  border-radius: var(--radius-m, 6px);
+  font-size: var(--fs-s, 0.8rem);
+  line-height: 1.35;
+  color: var(--text-2, #bdbcc8);
+  pointer-events: none;
+  transform: translate(var(--tx), var(--ty));
+  white-space: nowrap;
+}
+
+.world-tooltip[hidden] {
+  display: none;
+}
+
+.world-tooltip[data-flip-x='true'] {
+  --tx: calc(-100% - 12px);
+}
+
+.world-tooltip[data-flip-y='true'] {
+  --ty: calc(-100% - 12px);
+}
+
+.world-tooltip-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+  color: var(--text, #ecebf1);
+}
+
+.world-error {
+  position: absolute;
+  inset: auto var(--sp-4, 16px) var(--sp-4, 16px);
+  padding: var(--sp-3, 12px);
+  border: 1px solid var(--danger, #f07171);
+  border-radius: var(--radius-m, 6px);
+  background: var(--danger-soft, rgba(240, 113, 113, 0.13));
+  color: var(--text, #ecebf1);
+  font-size: var(--fs-m, 0.875rem);
+}
+
+/* Narrow maps: keep the controls, drop the minimap, compact the legend. */
+@container world (max-width: 520px) {
+  .world-minimap {
+    display: none;
+  }
+  .world-legend {
+    padding: 4px 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .world-control {
+    transition: none;
+  }
+}

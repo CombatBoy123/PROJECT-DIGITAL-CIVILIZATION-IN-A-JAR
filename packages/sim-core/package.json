@@ -1,0 +1,31 @@
+{
+  "name": "@civ/sim-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic simulation engine for Digital Civilization in a Jar. Pure TypeScript, no I/O.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "benchmark": "tsx --conditions=source bench/tick-benchmark.ts"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "tsx": "4.23.15",
+    "vitest": "4.1.11"
+  }
+}

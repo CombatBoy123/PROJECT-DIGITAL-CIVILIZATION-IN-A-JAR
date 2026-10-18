@@ -1,0 +1,132 @@
+# Continuous integration: formatting, lint, type-check, unit + integration tests
+# (real PostgreSQL), production build, Playwright browser tests, and a Docker image
+# smoke test. See docs/TESTING.md.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, test, build, e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: civ
+          POSTGRES_PASSWORD: civ
+          POSTGRES_DB: civ_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U civ -d civ_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://civ:civ@localhost:5432/civ_dev
+      # Server integration tests (truncated by the tests).
+      TEST_DATABASE_URL: postgresql://civ:civ@localhost:5432/civ_test
+      # Playwright's server uses civ_e2e (see apps/web/playwright.config.ts).
+      E2E_DATABASE_URL: postgresql://civ:civ@localhost:5432/civ_e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs the pnpm version pinned by package.json "packageManager".
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create test databases
+        run: |
+          for db in civ_test civ_e2e; do
+            docker exec ${{ job.services.postgres.id }} psql -U civ -d civ_dev -c "CREATE DATABASE $db OWNER civ"
+          done
+
+      # db:migrate reads ../../.env only for variables that are not already set,
+      # so DATABASE_URL from the environment selects the target database.
+      # (The server tests also migrate civ_test themselves; `pnpm test:e2e` runs
+      # db:migrate:e2e, which uses E2E_DATABASE_URL, before Playwright.)
+      - name: Migrate test and e2e databases
+        run: |
+          DATABASE_URL="$TEST_DATABASE_URL" pnpm db:migrate
+          pnpm db:migrate:e2e
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Unit and integration tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @civ/web exec playwright install --with-deps chromium
+
+      - name: Browser tests
+        run: pnpm test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/e2e/.artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  image:
+    name: Docker image smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker compose --profile app build app
+
+      # Starts PostgreSQL and the app (migrations on start), waits for both health
+      # checks, then exercises the served web app, the public API and token auth.
+      - name: Start stack and check health
+        env:
+          OPERATOR_TOKEN: ci-only-operator-token-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          docker compose --profile app up -d --wait --wait-timeout 180
+          curl -fsS http://127.0.0.1:3001/api/health
+          curl -fsS http://127.0.0.1:3001/ -o /dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3001/api/civilizations \
+            -H 'content-type: application/json' -d '{"name":"CI smoke"}')" = 401
+          curl -fsS -X POST http://127.0.0.1:3001/api/civilizations \
+            -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'content-type: application/json' \
+            -d '{"name":"CI smoke","seed":"demo-1","config":{"population":100}}' -o /dev/null
+
+      - name: Container logs
+        if: always()
+        run: docker compose --profile app logs --no-color
+
+      - name: Stop stack
+        if: always()
+        run: docker compose --profile app down -v

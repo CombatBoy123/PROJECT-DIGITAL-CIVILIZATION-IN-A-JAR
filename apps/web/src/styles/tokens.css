@@ -1,0 +1,85 @@
+/*
+ * Design tokens. Dark charcoal laboratory palette with restrained purple (interface
+ * accent) and cyan (data) highlights. Text colours meet WCAG AA (≥ 4.5:1) on every
+ * surface they are used on; the data colour was checked with the dataviz palette
+ * validator against --surface-1.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces, from page plane up to raised controls */
+  --bg: #101114;
+  --surface-1: #17181c;
+  --surface-2: #1e2025;
+  --surface-3: #272930;
+  --overlay: rgba(6, 7, 9, 0.72);
+
+  /* Lines */
+  --border: #2a2c33;
+  --border-strong: #3b3e48;
+
+  /* Ink */
+  --text: #ecebf1;
+  --text-2: #bdbcc8;
+  --text-muted: #8f8e9c;
+
+  /* Accents */
+  --accent: #a597f5;
+  --accent-strong: #6d5ce0;
+  --accent-soft: rgba(143, 126, 240, 0.16);
+  --data: #1f9fb0;
+  --data-text: #5fcfdd;
+  --data-soft: rgba(31, 159, 176, 0.18);
+
+  /* Status (always paired with a text label) */
+  --ok: #3ccf8e;
+  --ok-soft: rgba(60, 207, 142, 0.14);
+  --warn: #e8b64c;
+  --warn-soft: rgba(232, 182, 76, 0.14);
+  --danger: #f07171;
+  --danger-strong: #c43c3c;
+  --danger-soft: rgba(240, 113, 113, 0.13);
+  --info-soft: rgba(165, 151, 245, 0.12);
+
+  /* Typography */
+  --font-sans:
+    system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --fs-xs: 0.72rem;
+  --fs-s: 0.8rem;
+  --fs-m: 0.875rem;
+  --fs-l: 1rem;
+  --fs-xl: 1.2rem;
+  --fs-xxl: 1.5rem;
+  --lh: 1.45;
+
+  /* Spacing scale (4px base) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* Shape and depth */
+  --radius-s: 4px;
+  --radius-m: 6px;
+  --radius-l: 10px;
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  /* Motion (subtle; disabled for reduced-motion users) */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur: 140ms;
+
+  /* Layout */
+  --header-h: 48px;
+  --sidebar-w: 300px;
+  --inspector-w: 340px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur: 0ms;
+  }
+}

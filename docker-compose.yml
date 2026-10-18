@@ -1,0 +1,60 @@
+# Local PostgreSQL for development, plus an optional single-container app.
+#
+#   docker compose up -d db                      # PostgreSQL 16 only (development)
+#   export OPERATOR_TOKEN=$(openssl rand -hex 32)
+#   docker compose --profile app up -d --build   # + server serving the built web app
+#
+# The credentials below (civ/civ) are for local development only. See docs/DEPLOYMENT.md.
+name: civ-jar
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: civ
+      POSTGRES_PASSWORD: civ
+      POSTGRES_DB: civ_dev
+    ports:
+      # Loopback only: the development database is not exposed to the network.
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates civ_test and civ_e2e on first start (empty volume only).
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U civ -d civ_dev']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  app:
+    profiles: ['app']
+    build: .
+    image: civ-jar:local
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://civ:civ@db:5432/civ_dev
+      HOST: 0.0.0.0
+      PORT: '3001'
+      AUTH_MODE: token
+      # Required for the app (24+ characters); the server refuses to start without it.
+      # Never commit a real token. Generate one with `openssl rand -hex 32`.
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-}
+      # Optional read token; passed through only when set in the shell.
+      VIEWER_TOKEN:
+      RESUME_RUNNING_ON_START: ${RESUME_RUNNING_ON_START:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Live stream connection caps (total / per client address).
+      STREAM_MAX_CONNECTIONS: ${STREAM_MAX_CONNECTIONS:-256}
+      STREAM_MAX_CONNECTIONS_PER_ADDRESS: ${STREAM_MAX_CONNECTIONS_PER_ADDRESS:-32}
+    ports:
+      - '${APP_PORT:-3001}:3001'
+    # The server writes final checkpoints on SIGTERM and force-exits after 30 s.
+    stop_grace_period: 40s
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-demo/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+playwright-report/
+test-results/
+apps/web/e2e/.artifacts/
+.DS_Store
+*.log

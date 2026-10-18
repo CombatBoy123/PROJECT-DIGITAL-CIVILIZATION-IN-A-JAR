@@ -1,0 +1,1279 @@
+/*
+ * Styles of the standalone browser demo. Colours, type and spacing come from
+ * ../styles/tokens.css (imported first); the map overlays come from world/world.css.
+ *
+ * Page contract of the published page: it is a one-screen app. html/body are 100%
+ * tall (never 100vh); :root keeps the host's top/bottom safe-area padding and the
+ * outer wrapper (.demo) carries the side gutters, including the side safe areas.
+ * Panels scroll inside themselves; the page never scrolls sideways.
+ */
+
+:root {
+  color-scheme: dark;
+  background: var(--bg);
+  color: var(--text);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* The host pads :root by the top/bottom safe areas; keep that padding inside 100%. */
+  box-sizing: border-box;
+  height: 100%;
+  background: var(--bg);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: var(--lh);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  height: 100%;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-s);
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* Utilities ---------------------------------------------------------------- */
+
+.muted {
+  color: var(--text-muted);
+}
+.small {
+  font-size: var(--fs-s);
+}
+.num {
+  font-variant-numeric: tabular-nums;
+}
+.nowrap {
+  white-space: nowrap;
+}
+.row {
+  display: flex;
+  align-items: center;
+}
+.wrap {
+  flex-wrap: wrap;
+}
+.gap-s {
+  gap: var(--sp-2);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Controls ----------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-m);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+}
+.btn:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-sm {
+  min-height: 30px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-s);
+}
+.btn-primary {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  background: #5f4fd0;
+}
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+}
+.btn-danger {
+  border-color: var(--danger-strong);
+  background: var(--danger-strong);
+  color: #fff;
+}
+.btn-danger:hover:not(:disabled) {
+  background: #ad3232;
+}
+.btn-danger-ghost {
+  border-color: rgba(240, 113, 113, 0.35);
+  background: transparent;
+  color: var(--danger);
+}
+.btn-danger-ghost:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+.btn-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: rgba(165, 151, 245, 0.45);
+  text-underline-offset: 2px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.link-btn:hover {
+  color: var(--text);
+  text-decoration-color: currentColor;
+}
+
+input {
+  width: 100%;
+  min-height: 38px;
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  /* 16px keeps iOS Safari from zooming into focused inputs. */
+  font-size: 16px;
+}
+input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 0;
+  accent-color: var(--accent-strong);
+}
+input::placeholder {
+  color: var(--text-muted);
+}
+input:focus-visible {
+  border-color: var(--accent);
+  border-radius: var(--radius-m);
+}
+input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.field-label {
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  font-weight: 500;
+}
+.field-hint {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.field-error {
+  color: var(--danger);
+  font-size: var(--fs-s);
+}
+.field-checkbox {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 2px var(--sp-2);
+  font-size: var(--fs-m);
+}
+.field-checkbox .field-hint {
+  grid-column: 2;
+}
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+}
+.segment {
+  min-width: 34px;
+  min-height: 30px;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-s);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.segment[aria-checked='true'] {
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px rgba(165, 151, 245, 0.45);
+}
+
+.tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+.tab {
+  position: relative;
+  flex: 1 0 auto;
+  min-height: 40px;
+  padding: var(--sp-2) 6px;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--fs-m);
+  font-weight: 500;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.tab:hover,
+.tab[aria-selected='true'] {
+  color: var(--text);
+}
+.tab[aria-selected='true']::after {
+  content: '';
+  position: absolute;
+  right: var(--sp-2);
+  bottom: 0;
+  left: var(--sp-2);
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.tab:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* Feedback ---------------------------------------------------------------- */
+
+.pill {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 2px var(--sp-2);
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.pill-running {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.pill-running .pill-dot {
+  animation: demo-pulse 1.6s ease-in-out infinite;
+}
+.pill-paused {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.pill-halted {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+@keyframes demo-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.alert {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid;
+  border-radius: var(--radius-m);
+  font-size: var(--fs-s);
+  overflow-wrap: anywhere;
+}
+.alert-error {
+  border-color: rgba(240, 113, 113, 0.4);
+  background: var(--danger-soft);
+}
+.alert-info {
+  border-color: rgba(165, 151, 245, 0.35);
+  background: var(--info-soft);
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-5) var(--sp-3);
+  color: var(--text-2);
+  font-size: var(--fs-m);
+  text-align: center;
+}
+
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+}
+.confirm-text {
+  font-size: var(--fs-m);
+}
+
+/* Meters: the track is a lighter step of the fill's own colour. */
+.meter-row {
+  display: grid;
+  grid-template-columns: minmax(84px, 38%) minmax(0, 1fr) 40px;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-s);
+}
+.meter-label {
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--accent-soft);
+}
+.meter-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width var(--dur) var(--ease);
+}
+.meter-data {
+  background: var(--data-soft);
+}
+.meter-data .meter-fill {
+  background: var(--data);
+}
+.meter-warn {
+  background: var(--warn-soft);
+}
+.meter-warn .meter-fill {
+  background: var(--warn);
+}
+.meter-value {
+  color: var(--text);
+  text-align: right;
+}
+
+.swatch {
+  display: inline-block;
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--bg);
+}
+
+/* Layout ------------------------------------------------------------------- */
+
+.demo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  height: 100%;
+  min-width: 0;
+  padding: var(--sp-2) max(16px, env(safe-area-inset-right, 0px)) var(--sp-2)
+    max(16px, env(safe-area-inset-left, 0px));
+}
+
+.demo-header {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.demo-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.demo-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  font-size: var(--fs-l);
+}
+.demo-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.demo-logo {
+  flex: none;
+  width: 20px;
+  height: 20px;
+}
+.demo-logo rect {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+.demo-logo circle {
+  fill: var(--data);
+}
+.demo-clock {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--sp-2);
+  color: var(--text-2);
+  font-size: var(--fs-s);
+}
+.demo-clock-main {
+  color: var(--text);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.sep {
+  color: var(--text-muted);
+}
+
+.demo-halt {
+  flex: none;
+}
+
+/*
+ * Phones: map, playback bar and panels stacked. The map row takes up to 44% of the
+ * small viewport height, but on short pages (the claude.ai viewer, an iPhone SE) it
+ * gives way first, so the panel keeps 250–300px wherever it can: its height is
+ * min(44svh, 100svh − 430px), never below 190px. The panel gets the rest and scrolls.
+ */
+.demo-main {
+  display: grid;
+  flex: 1;
+  grid-template-areas:
+    'map'
+    'play'
+    'side';
+  grid-template-rows: minmax(190px, min(44vh, calc(100vh - 430px))) auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-2);
+  min-height: 0;
+}
+@supports (height: 1svh) {
+  .demo-main {
+    grid-template-rows: minmax(190px, min(44svh, calc(100svh - 430px))) auto minmax(0, 1fr);
+  }
+}
+
+.demo-map {
+  grid-area: map;
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  background: #0c0d10;
+}
+
+.playback {
+  display: flex;
+  grid-area: play;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.playback-play {
+  min-width: 92px;
+}
+.speed {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+.speed-label {
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  white-space: nowrap;
+}
+/* Phones: one select (with the unit in each option) replaces the radio group. */
+.speed-picker {
+  position: relative;
+  display: none;
+}
+.speed-select {
+  min-height: 36px;
+  padding: 0 28px 0 var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-m);
+  font-variant-numeric: tabular-nums;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+.speed-select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.speed-caret {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  width: 14px;
+  height: 14px;
+  margin-top: -7px;
+  fill: none;
+  stroke: var(--text-2);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+.label-short {
+  display: none;
+}
+
+.demo-side {
+  container: side / inline-size;
+  display: flex;
+  grid-area: side;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  background: var(--surface-1);
+}
+.demo-panel {
+  /* Containing block for visually hidden live regions, so they add no page height. */
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-3);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.demo-panel:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  border-radius: 0 0 var(--radius-l) var(--radius-l);
+}
+.demo-panel > * + * {
+  margin-top: var(--sp-3);
+}
+
+/* Narrow phones and short landscape phones: the playback bar stays on one row. */
+@media (max-width: 440px), (min-width: 560px) and (max-height: 480px) and (orientation: landscape) {
+  .playback {
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+  .playback .btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0 8px;
+  }
+  .playback-play {
+    min-width: 0;
+  }
+  .speed {
+    flex: none;
+  }
+  .speed-radios {
+    display: none;
+  }
+  .speed-picker {
+    display: inline-flex;
+    margin-left: 0;
+  }
+}
+
+/* Very narrow phones (320–359px): short step labels and a smaller title. */
+@media (max-width: 359px) {
+  .label-long {
+    display: none;
+  }
+  .label-short {
+    display: inline;
+  }
+  .demo-title {
+    font-size: 0.9375rem;
+  }
+}
+
+/* Wider screens (tablets, landscape phones, desktop): panels beside the map. */
+@media (min-width: 760px), (min-width: 560px) and (max-height: 480px) and (orientation: landscape) {
+  .demo {
+    gap: var(--sp-3);
+    padding-top: var(--sp-3);
+    padding-bottom: var(--sp-3);
+  }
+  .demo-main {
+    grid-template-areas:
+      'map side'
+      'play side';
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) clamp(280px, 34vw, 420px);
+    gap: var(--sp-3);
+  }
+  .demo-title {
+    font-size: var(--fs-xl);
+  }
+  .demo-title-row {
+    justify-content: flex-start;
+    gap: var(--sp-3);
+  }
+}
+
+/*
+ * Short landscape screens (a phone turned sideways): one header row. The logo stays
+ * (the title text is kept for assistive technology only), the calendar, weather and
+ * tick sit beside it, and the run status ends the row.
+ */
+@media (min-width: 560px) and (max-height: 480px) and (orientation: landscape) {
+  .demo {
+    gap: var(--sp-2);
+    padding-top: var(--sp-2);
+    padding-bottom: var(--sp-2);
+  }
+  .demo-header {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-3);
+  }
+  .demo-title-row {
+    display: contents;
+  }
+  .demo-title {
+    flex: none;
+  }
+  .demo-title-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .demo-clock {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--fs-m);
+  }
+  .demo-header .pill {
+    order: 2;
+  }
+  .demo-main {
+    gap: var(--sp-2) var(--sp-3);
+  }
+}
+
+/* A narrow panel column (320px phones, landscape phones): all five tabs still fit. */
+@container side (max-width: 300px) {
+  .tab {
+    padding: var(--sp-2) 2px;
+    font-size: 0.8125rem;
+  }
+}
+
+/* Panels ------------------------------------------------------------------- */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+.section-title {
+  color: var(--text-2);
+  font-size: var(--fs-s);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.note {
+  padding-left: var(--sp-2);
+  border-left: 2px solid var(--accent);
+  color: var(--text-2);
+  font-size: var(--fs-s);
+}
+.prose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  color: var(--text-2);
+  font-size: var(--fs-m);
+}
+.prose strong {
+  color: var(--text);
+}
+
+.inspector > * + * {
+  margin-top: var(--sp-3);
+}
+.inspector-toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin: calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2)) 0;
+}
+.inspector-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.inspector-kind {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.inspector-title {
+  font-size: var(--fs-xl);
+  overflow-wrap: anywhere;
+}
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2) var(--sp-3);
+  margin: 0;
+}
+.kv dt {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.kv dd {
+  margin: 0;
+  font-size: var(--fs-m);
+  overflow-wrap: anywhere;
+}
+.kv-wide {
+  grid-column: 1 / -1;
+}
+.activity-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.link-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-m);
+}
+.link-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 5px 0;
+}
+.link-list li + li {
+  border-top: 1px solid var(--border);
+}
+
+/* People */
+.people > * + * {
+  margin-top: var(--sp-2);
+}
+.people-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.person {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0 var(--sp-2);
+  width: 100%;
+  min-height: 48px;
+  padding: 6px var(--sp-2);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.person:hover {
+  background: var(--surface-2);
+}
+.person[aria-current='true'] {
+  background: var(--accent-soft);
+}
+.person-name {
+  overflow: hidden;
+  font-size: var(--fs-m);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.person-meta {
+  grid-column: 1;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.person-activity {
+  display: inline-flex;
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: var(--fs-s);
+}
+
+/* Society: stat tiles (label · value · unit and kind; tap for the definition). */
+.society > * + * {
+  margin-top: var(--sp-3);
+}
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.stat {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+}
+.stat-open {
+  grid-column: 1 / -1;
+  border-color: var(--border-strong);
+}
+.stat-button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.stat-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: var(--fs-s);
+}
+.stat-value {
+  overflow-wrap: anywhere;
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  line-height: 1.25;
+}
+.stat-unit {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.stat-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-3) var(--sp-3);
+  color: var(--text-2);
+  font-size: var(--fs-s);
+}
+.stat-formula code {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* Events */
+.events > * + * {
+  margin-top: var(--sp-2);
+}
+.event-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.event-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-s);
+}
+.event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+.event-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--sp-2);
+  min-width: 0;
+}
+.event-label {
+  font-weight: 600;
+}
+.event-summary {
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.event-cat {
+  padding: 0 5px;
+  border-radius: var(--radius-s);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.cat-genesis {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.cat-environment {
+  background: var(--data-soft);
+  color: var(--data-text);
+}
+.cat-demography {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.cat-economy,
+.cat-money {
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.event-refs {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.event-refs li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: 1px 0;
+}
+.event-ref-role {
+  flex: none;
+  width: 5.5em;
+  color: var(--text-muted);
+}
+
+/* World */
+.world-panel > * + * {
+  margin-top: var(--sp-3);
+}
+.world-panel > .section:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+.world-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.world-message {
+  margin: 0;
+}
+/* Empty live region: present for announcements, but takes no room in the column. */
+.world-message:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+.world-message .alert {
+  scroll-margin: var(--sp-3);
+}
+.fingerprint code {
+  display: block;
+  padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+  color: var(--data-text);
+  font-size: var(--fs-m);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Narrow maps (phones): the legend and the zoom/fit buttons move out of the drawing
+ * into a band along the bottom of the map card, so they never cover houses or
+ * fields. The canvas surface ends above the band, so "fit to view" (which fits the
+ * surface) frames the whole map in the part that is actually visible.
+ */
+.demo-map {
+  --map-band: 48px;
+}
+@container world (max-width: 520px) {
+  .demo-map .world-surface {
+    bottom: var(--map-band);
+  }
+  .demo-map .world-view::before {
+    content: '';
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: var(--map-band);
+    border-top: 1px solid var(--border);
+    background: var(--surface-1);
+    pointer-events: none;
+  }
+  .demo-map .world-legend {
+    top: auto;
+    right: auto;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    align-items: center;
+    height: var(--map-band);
+    padding: 0 0 0 10px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+  }
+  .demo-map .world-legend ul {
+    grid-template-columns: auto auto auto auto auto auto;
+    column-gap: 5px;
+    row-gap: 2px;
+  }
+  .demo-map .world-legend-count {
+    padding-right: 6px;
+  }
+  .demo-map .world-controls {
+    top: auto;
+    right: 2px;
+    bottom: 0;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    height: var(--map-band);
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+  }
+  .demo-map .world-control + .world-control {
+    margin-top: 0;
+  }
+}
+/* Narrower still (360px phones and below): labels only; the Society tab has the counts. */
+@container world (max-width: 345px) {
+  .demo-map .world-legend ul {
+    grid-template-columns: auto auto auto auto;
+    column-gap: 5px;
+  }
+  .demo-map .world-legend-label {
+    padding-right: 6px;
+  }
+  .demo-map .world-legend-count {
+    display: none;
+  }
+}
+
+/*
+ * Touch screens: every control at least 44px tall (Apple HIG / WCAG 2.5.5), entity
+ * links as full-height rows, and no text below 12.8px.
+ */
+@media (pointer: coarse) {
+  :root {
+    --fs-xs: 0.8rem;
+  }
+  code {
+    font-size: 1em;
+  }
+  .btn,
+  .btn-sm,
+  .segment,
+  .tab,
+  .speed-select,
+  input {
+    min-height: 44px;
+  }
+  input[type='checkbox'] {
+    min-height: 0;
+  }
+  .segment {
+    min-width: 44px;
+  }
+  .demo-map .world-control,
+  .world-control {
+    width: 44px;
+    height: 44px;
+  }
+  @container world (max-width: 300px) {
+    .demo-map .world-control {
+      width: 40px;
+    }
+  }
+  .link-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    vertical-align: middle;
+  }
+  .link-list li {
+    align-items: center;
+    padding: 0;
+  }
+  .event-refs li {
+    align-items: center;
+    padding: 0;
+  }
+  .event-item {
+    padding-bottom: var(--sp-1);
+  }
+  .inspector-toolbar {
+    margin-top: calc(-1 * var(--sp-2));
+  }
+  input[type='checkbox'] {
+    width: 22px;
+    height: 22px;
+  }
+  .field-checkbox label {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn,
+  .meter-fill {
+    transition: none;
+  }
+  .pill-running .pill-dot {
+    animation: none;
+  }
+}
