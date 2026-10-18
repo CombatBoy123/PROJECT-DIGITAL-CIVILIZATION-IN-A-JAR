@@ -78,6 +78,10 @@ pnpm db:migrate                   # apply migrations to civ_dev
 pnpm dev                          # API on http://127.0.0.1:3001, UI on http://localhost:5173
 ```
 
+`docker compose` needs the Docker Compose v2 plugin; without it Docker answers
+`unknown shorthand flag: 'd' in -d`. Install the plugin, use the older `docker-compose`
+command, or skip Docker: `scripts/setup-debian.sh` installs PostgreSQL directly.
+
 Then open <http://localhost:5173>, create a civilization (name, seed, population) and
 press play. Without tokens the server only answers requests addressed to a loopback host
 (`localhost`, `127.0.0.1`, `[::1]`), so opening the UI through a LAN address needs token
