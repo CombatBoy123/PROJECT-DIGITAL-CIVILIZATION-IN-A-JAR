@@ -11,6 +11,12 @@ import { createLogger, defaultClientConditions, defaultServerConditions, defineC
  * to the Fastify server.
  */
 const apiTarget = process.env.API_PROXY_TARGET ?? 'http://127.0.0.1:3001';
+/**
+ * Interface the dev server listens on. Unset = localhost only. WEB_HOST=0.0.0.0 makes it
+ * reachable from outside the machine, e.g. a browser on the host of a virtual machine
+ * through a forwarded port. The API server itself stays on loopback behind the proxy.
+ */
+const webHost = process.env.WEB_HOST || undefined;
 
 /** Socket errors that only mean "the browser closed its end of the proxied WebSocket". */
 const CLOSED_SOCKET_CODES = new Set(['ECONNRESET', 'EPIPE']);
@@ -39,6 +45,7 @@ export default defineConfig({
     },
   },
   server: {
+    host: webHost,
     proxy: {
       '/api': { target: apiTarget, changeOrigin: true, ws: true },
     },

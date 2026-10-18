@@ -82,6 +82,9 @@ pnpm dev                          # API on http://127.0.0.1:3001, UI on http://l
 `unknown shorthand flag: 'd' in -d`. Install the plugin, use the older `docker-compose`
 command, or skip Docker: `scripts/setup-debian.sh` installs PostgreSQL directly.
 
+Running inside a virtual machine and browsing from the host: start with
+`WEB_HOST=0.0.0.0 pnpm dev` and forward port 5173 ([docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#setup)).
+
 Then open <http://localhost:5173>, create a civilization (name, seed, population) and
 press play. Without tokens the server only answers requests addressed to a loopback host
 (`localhost`, `127.0.0.1`, `[::1]`), so opening the UI through a LAN address needs token

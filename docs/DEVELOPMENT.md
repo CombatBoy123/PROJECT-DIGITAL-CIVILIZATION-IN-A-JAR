@@ -33,6 +33,15 @@ mode the server only answers requests whose `Host` is a loopback name and whose
 rebinding); to open the UI from another device, use token auth
 ([DEPLOYMENT.md](DEPLOYMENT.md#authentication)).
 
+**Running in a virtual machine, browsing from the host.** Start with
+`WEB_HOST=0.0.0.0 pnpm dev` so the Vite dev server listens on all of the VM's interfaces,
+and forward the port to the host (VirtualBox NAT: Settings → Network → Adapter 1 →
+Advanced → Port Forwarding, rule TCP, host IP `127.0.0.1`, host port 5173, guest port
+5173). Then open <http://localhost:5173> on the host. The browser still talks to
+`localhost:5173`, so the loopback `Host` and `Origin` checks pass, and the API server
+stays on the VM's loopback behind the proxy. With bridged or host-only networking the
+dev server is reachable by other machines on that network, so prefer NAT forwarding.
+
 ### Database
 
 `docker compose up -d db` starts `postgres:16` with user/password `civ`/`civ`,
