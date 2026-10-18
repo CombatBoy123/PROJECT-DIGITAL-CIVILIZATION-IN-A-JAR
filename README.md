@@ -60,7 +60,13 @@ done, verified and outstanding.
 
 ## Quick start
 
-Prerequisites: **Node.js ≥ 22.12**, **pnpm 10** (`corepack enable`), and **PostgreSQL 16**
+**One command on Debian, Ubuntu or Kali Linux.** From the repository root, run
+`bash scripts/setup-debian.sh`. It installs Node 22 (with nvm) and PostgreSQL if they are
+missing, creates the local development role and databases, installs the dependencies,
+applies the migrations and starts the app on <http://localhost:5173>. Running it again is
+safe; `--no-start` skips the last step.
+
+**Manual setup.** Prerequisites: **Node.js ≥ 22.12**, **pnpm 10** (`corepack enable`), and **PostgreSQL 16**
 — your own, or Docker Compose.
 
 ```sh
